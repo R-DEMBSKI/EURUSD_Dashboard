@@ -1,137 +1,245 @@
 import streamlit as st
-import streamlit.components.v1 as components
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from sklearn.linear_model import LinearRegression
+from scipy.stats import norm
 
-# --- 1. KONFIGURACJA STRONY (Ultra Wide & Dark) ---
-st.set_page_config(
-    layout="wide",
-    page_title="EURUSD Quant Cockpit",
-    page_icon="🦅",
-    initial_sidebar_state="collapsed" # Zwijamy sidebar, żeby mieć więcej miejsca
-)
+# --- 1. KONFIGURACJA UI ---
+st.set_page_config(layout="wide", page_title="EURUSD Quant Lab", page_icon="🧪")
 
-# --- 2. ZAAWANSOWANY CSS (Professional UI/UX) ---
 st.markdown("""
 <style>
-    /* Tło aplikacji */
-    .stApp { background-color: #0a0c0f; } /* Bardzo głęboka czerń */
+    .stApp { background-color: #050505; color: #e0e0e0; }
+    .block-container { padding-top: 1rem; }
     
-    /* Reset marginesów dla maksymalnego wykorzystania miejsca */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 2rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
-        max-width: 100%;
+    /* Stylizacja metryk */
+    div[data-testid="metric-container"] {
+        background-color: #111;
+        border: 1px solid #333;
+        padding: 10px;
+        border-radius: 5px;
     }
     
-    /* Ukrycie standardowego nagłówka Streamlit */
-    header {visibility: hidden;}
-    
-    /* STYLIZACJA KONTENERÓW DLA WIDGETÓW */
-    /* Tworzymy "karty" dla każdego widgetu, żeby wyglądało to spójnie */
-    [data-testid="stVerticalBlock"] > [style*="flex-direction: column;"] > [data-testid="stVerticalBlock"] {
-        background-color: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 15px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        margin-bottom: 1rem;
-    }
-    
-    /* Nagłówki sekcji */
-    h3, h4 {
-        color: #e6edf3 !important;
-        font-weight: 600;
-        margin-bottom: 15px !important;
-        border-bottom: 2px solid #238636; /* Zielony akcent */
-        padding-bottom: 5px;
-        font-size: 1.1rem !important;
-    }
-    
-    /* Divider */
-    hr { border-color: #30363d; }
-
-    /* Hack dla iframe'ów - próba wymuszenia ciemniejszego otoczenia */
-    iframe {
-        background-color: #ffffff; /* Myfxbook wymusza biały, musimy to zaakceptować */
-        border-radius: 4px;
-    }
+    /* Ukrycie elementów Streamlit */
+    header, footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. HELPER FUNCTION ---
-def render_widget(html_code, height):
-    # Opakowujemy widget w div, żeby CSS mógł go złapać jako kontener
-    components.html(html_code, height=height, scrolling=True)
-
-# --- 4. DEFINICJE WIDGETÓW (Zwiększone wysokości) ---
-
-# Row 1 Widgets
-w_hours = """<iframe src="https://widget.myfxbook.com/widget/market-hours.html" style="border: 0; width:100%; height:100%;"></iframe>"""
-w_news = """<iframe src="https://widget.myfxbook.com/widget/news.html" style="border: 0; width:100%; height:100%;"></iframe>"""
-
-# Row 2 (Quant Data) Widgets - Zwiększona wysokość dla czytelności
-w_heatmap = """<iframe src="https://widget.myfxbook.com/widget/heat-map.html?symbols=EURUSD,GBPUSD,USDJPY,USDCAD,AUDUSD,NZDUSD,USDCHF&type=0" width="100%" height="100%" frameborder="0"></iframe>"""
-w_volatility = """<iframe src="https://widget.myfxbook.com/widget/market-volatility.html?symbols=EURUSD,GBPUSD,USDJPY,USDCAD,AUDUSD,NZDUSD,USDCHF&type=0" width="100%" height="100%" frameborder="0"></iframe>"""
-w_correlation = """<iframe src="https://widget.myfxbook.com/widget/market-correlation.html?rowSymbols=EURUSD,GBPUSD,USDJPY&colSymbols=USDCAD,AUDUSD,USDCHF&timeScale=1440" width="100%" height="100%" frameborder="0"></iframe>"""
-
-# Row 3 (Deep Dive) Widgets
-w_patterns = """<iframe src="https://widgets.myfxbook.com/widgets/patterns.html?symbols=1&timeFrame=1" width="100%" height="100%" frameborder="0"></iframe>"""
-w_liquidity = """<iframe src="https://widgets.myfxbook.com/widgets/liquidity.html?" width="100%" height="100%" frameborder="0"></iframe>"""
-w_rates = """<iframe src="https://widget.myfxbook.com/widget/market-quotes.html?symbols=AUDUSD,EURGBP,EURUSD,GBPUSD,USDCAD,USDCHF,USDJPY" style="border: 0; width:100%; height:100%;"></iframe>"""
-
-
-# --- 5. LAYOUT KOKPITU (SINGLE PAGE GRID) ---
-
-st.markdown("### 🦅 EUR/USD Market Overview")
-
-# --- ROW 1: STATUS & NEWS (Dzielimy ekran 1/3 do 2/3) ---
-col_r1_1, col_r1_2 = st.columns([1, 2])
-
-with col_r1_1:
-    st.markdown("#### 🕒 Market Sessions")
-    render_widget(w_hours, height=350)
+# --- 2. SILNIK POBIERANIA DANYCH ---
+@st.cache_data(ttl=600) # Cache 10 min
+def get_quant_data():
+    # Pobieramy EURUSD, DXY i US 10Y Yield
+    tickers = "EURUSD=X DX-Y.NYB ^TNX"
+    data = yf.download(tickers, period="2y", interval="1d", group_by='ticker', progress=False)
     
-with col_r1_2:
-    st.markdown("#### 📰 Breaking Headlines")
-    render_widget(w_news, height=350)
+    # Przetwarzanie MultiIndex
+    df = pd.DataFrame()
+    df['EURUSD'] = data['EURUSD=X']['Close']
+    df['DXY'] = data['DX-Y.NYB']['Close']
+    df['US10Y'] = data['^TNX']['Close']
+    
+    # Forward Fill dla braków w danych (święta itp.)
+    df = df.fillna(method='ffill').dropna()
+    return df
 
-st.markdown("---")
+# --- 3. ALGORYTMY MATEMATYCZNE ---
 
-# --- ROW 2: QUANT DATA CORE (Trzy równe kolumny) ---
-st.markdown("### 🧠 Quantitative Flow Analysis")
-col_r2_1, col_r2_2, col_r2_3 = st.columns(3)
+def calculate_monte_carlo(prices, days_ahead=5, simulations=1000):
+    """Generuje symulacje przyszłych cen oparte na zmienności historycznej (Geometric Brownian Motion)"""
+    last_price = prices.iloc[-1]
+    returns = prices.pct_change().dropna()
+    daily_vol = returns.std()
+    
+    simulation_df = pd.DataFrame()
+    
+    for i in range(simulations):
+        # Generowanie losowych szoków cenowych
+        count = 0
+        price_list = [last_price]
+        price = last_price
+        
+        for d in range(days_ahead):
+            # Wzór Blacka-Scholesa na ruch Browna
+            shock = np.random.normal(0, daily_vol)
+            price = price * (1 + shock)
+            price_list.append(price)
+            
+        simulation_df[i] = price_list
+        
+    return simulation_df
 
-with col_r2_1:
-    st.markdown("#### 🔥 Currency Heatmap")
-    render_widget(w_heatmap, height=500)
-    st.caption("Zielone = Silne, Czerwone = Słabe. Szukaj par z największym kontrastem.")
+def calculate_fair_value(df):
+    """Regresja liniowa: Przewiduje cenę EURUSD na podstawie DXY i US10Y"""
+    # X = Zmienne niezależne (DXY, Yields), y = Zmienna zależna (EURUSD)
+    X = df[['DXY', 'US10Y']].tail(100) # Trenujemy na ostatnich 100 dniach
+    y = df['EURUSD'].tail(100)
+    
+    model = LinearRegression()
+    model.fit(X, y)
+    
+    # Obliczamy "Fair Value" dla aktualnych danych
+    current_x = df[['DXY', 'US10Y']].iloc[-1].values.reshape(1, -1)
+    fair_value = model.predict(current_x)[0]
+    r_squared = model.score(X, y) # Jak dobrze model pasuje (0-1)
+    
+    return fair_value, r_squared
 
-with col_r2_2:
-    st.markdown("#### ⚡ Volatility (Pips)")
-    render_widget(w_volatility, height=500)
-    st.caption("Wysoka zmienność = Większe ryzyko i większy potencjał.")
+def calculate_volatility_cone(prices, window_sizes=[5, 20, 50, 100]):
+    """Oblicza historyczną zmienność dla różnych horyzontów czasowych"""
+    log_returns = np.log(prices / prices.shift(1))
+    vol_cone = {}
+    
+    for window in window_sizes:
+        # Zmienność roczna dla danego okna
+        realized_vol = log_returns.rolling(window=window).std() * np.sqrt(252)
+        # Bierzemy percentyle (Min, Max, Median)
+        vol_cone[window] = {
+            'min': realized_vol.min(),
+            'max': realized_vol.max(),
+            'median': realized_vol.median(),
+            'current': realized_vol.iloc[-1]
+        }
+    return vol_cone
 
-with col_r2_3:
-    st.markdown("#### 🔗 Correlation Matrix (Daily)")
-    render_widget(w_correlation, height=500)
-    st.caption("Unikaj otwierania pozycji na parach skorelowanych > 80%.")
+# --- 4. GŁÓWNY INTERFEJS ---
 
-st.markdown("---")
+st.title("🧪 EUR/USD Quantitative Lab")
+st.caption("Algorithmic Analysis & Statistical Modeling")
 
-# --- ROW 3: DEEP DIVE & REFERENCE (Dzielimy 2/1/1) ---
-st.markdown("### 🎯 Technicals & Liquidity")
-col_r3_1, col_r3_2, col_r3_3 = st.columns([2, 1, 1])
+try:
+    df = get_quant_data()
+    current_price = df['EURUSD'].iloc[-1]
+    
+    # --- SEKCJA 1: FAIR VALUE MODEL (REGRESJA) ---
+    fair_val, model_confidence = calculate_fair_value(df)
+    deviation = current_price - fair_val
+    
+    # Koloryzacja odchylenia
+    dev_color = "red" if deviation > 0 else "green" 
+    # Jeśli cena > fair value (red) -> potencjalny short. Jeśli cena < fair value (green) -> potencjalny long.
 
-with col_r3_1:
-    st.markdown("#### 📐 Auto-Chart Patterns (EURUSD M1)")
-    # Przefiltrowałem widget tylko do EURUSD (symbols=1) i M1 dla daytradingu
-    render_widget(w_patterns, height=600)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Aktualna Cena", f"{current_price:.4f}")
+    col2.metric("Fair Value (Model)", f"{fair_val:.4f}", help="Cena wynikająca z regresji względem DXY i US10Y")
+    col3.metric("Odchylenie (Mispricing)", f"{deviation:.4f}", delta_color="inverse")
+    col4.metric("Siła Modelu (R²)", f"{model_confidence:.2f}", help="Powyżej 0.80 oznacza bardzo silną zależność fundamentalną")
 
-with col_r3_2:
-    st.markdown("#### 💧 Market Liquidity")
-    render_widget(w_liquidity, height=600)
+    st.markdown("---")
 
-with col_r3_3:
-    st.markdown("#### 💱 Live Quotes")
-    render_widget(w_rates, height=600)
+    # --- SEKCJA 2: MONTE CARLO & PRAWDOPODOBIEŃSTWO ---
+    st.subheader("🎲 Monte Carlo Simulation (Next 5 Days)")
+    
+    col_mc_chart, col_mc_stats = st.columns([3, 1])
+    
+    with col_mc_chart:
+        # Generujemy symulację
+        sim_data = calculate_monte_carlo(df['EURUSD'], days_ahead=5, simulations=500)
+        
+        fig_mc = go.Figure()
+        # Rysujemy 500 linii (zmniejszona przezroczystość)
+        for col in sim_data.columns[:100]: # Pokaż tylko 100 linii dla wydajności, statystyka liczona z całości
+            fig_mc.add_trace(go.Scatter(y=sim_data[col], mode='lines', line=dict(color='#2A2A2A', width=1), showlegend=False, hoverinfo='skip'))
+            
+        # Dodajemy średnią ścieżkę
+        mean_path = sim_data.mean(axis=1)
+        fig_mc.add_trace(go.Scatter(y=mean_path, mode='lines', name="Mean Path", line=dict(color='#00CC96', width=3)))
+        
+        # Start
+        fig_mc.add_hline(y=current_price, line_dash="dash", line_color="white", annotation_text="Start")
+
+        fig_mc.update_layout(
+            template="plotly_dark", 
+            title="Projekcja ścieżek cenowych (Random Walk)",
+            height=400,
+            xaxis_title="Dni do przodu",
+            yaxis_title="Cena Symulowana"
+        )
+        st.plotly_chart(fig_mc, use_container_width=True)
+        
+    with col_mc_stats:
+        # Statystyka z symulacji
+        final_prices = sim_data.iloc[-1]
+        p95 = np.percentile(final_prices, 95)
+        p50 = np.percentile(final_prices, 50)
+        p05 = np.percentile(final_prices, 5)
+        
+        st.markdown("##### 🔮 Probability Cone")
+        st.write(f"**Górny pułap (95% szans):**")
+        st.code(f"{p95:.5f}")
+        st.write(f"**Środek (Oczekiwana):**")
+        st.code(f"{p50:.5f}")
+        st.write(f"**Dolny pułap (5% szans):**")
+        st.code(f"{p05:.5f}")
+        
+        prob_up = (final_prices > current_price).mean() * 100
+        st.metric("Szansa na wzrost", f"{prob_up:.1f}%")
+
+    st.markdown("---")
+    
+    # --- SEKCJA 3: DISTRIBUTION ANALYTICS (DZWON GAUSSA) ---
+    col_dist, col_vol = st.columns(2)
+    
+    with col_dist:
+        st.subheader("📊 Rozkład Zwrotów (Gaussian)")
+        # Obliczamy dzienne zmiany procentowe
+        returns = df['EURUSD'].pct_change().dropna() * 100
+        curr_return = returns.iloc[-1]
+        
+        # Fitujemy rozkład normalny
+        mu, std = norm.fit(returns)
+        
+        # Histogram
+        fig_dist = px.histogram(returns, nbins=100, title="Czy dzisiejszy ruch to anomalia?", opacity=0.6)
+        
+        # Dodajemy dzisiejszy ruch
+        fig_dist.add_vline(x=curr_return, line_color="yellow", line_width=3, annotation_text="DZIŚ")
+        
+        # Linie Sigmy (Odchylenia standardowe)
+        fig_dist.add_vline(x=std, line_dash="dot", line_color="red", annotation_text="+1σ")
+        fig_dist.add_vline(x=-std, line_dash="dot", line_color="red", annotation_text="-1σ")
+        fig_dist.add_vline(x=2*std, line_dash="dot", line_color="red", annotation_text="+2σ")
+        
+        fig_dist.update_layout(template="plotly_dark", showlegend=False, xaxis_title="Zmiana %")
+        st.plotly_chart(fig_dist, use_container_width=True)
+        
+        # Interpretacja
+        z_score_now = (curr_return - mu) / std
+        st.info(f"Dzisiejszy Z-Score: {z_score_now:.2f}. " + ("Ruch w normie." if abs(z_score_now) < 2 else "⚠️ STATYSTYCZNA ANOMALIA!"))
+
+    with col_vol:
+        st.subheader("⚡ Volatility Cone (Ryzyko)")
+        vol_data = calculate_volatility_cone(df['EURUSD'])
+        
+        # Przygotowanie danych do wykresu
+        windows = list(vol_data.keys())
+        max_vols = [vol_data[w]['max'] for w in windows]
+        min_vols = [vol_data[w]['min'] for w in windows]
+        curr_vols = [vol_data[w]['current'] for w in windows]
+        
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Scatter(x=windows, y=max_vols, mode='lines+markers', name="Max Vol (History)", line=dict(color='red', dash='dot')))
+        fig_vol.add_trace(go.Scatter(x=windows, y=min_vols, mode='lines+markers', name="Min Vol (History)", line=dict(color='green', dash='dot')))
+        fig_vol.add_trace(go.Scatter(x=windows, y=curr_vols, mode='lines+markers', name="Current Vol", line=dict(color='yellow', width=3)))
+        
+        fig_vol.update_layout(
+            template="plotly_dark", 
+            title="Czy zmienność jest tania czy droga?",
+            xaxis_title="Horyzont (Dni)",
+            yaxis_title="Annualized Volatility"
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+        
+        if curr_vols[0] < min_vols[0] * 1.2:
+            st.success("Zmienność jest bardzo niska (Cisza przed burzą).")
+        elif curr_vols[0] > max_vols[0] * 0.8:
+            st.error("Ekstremalnie wysoka zmienność (Panika/Euforia).")
+        else:
+            st.warning("Zmienność w normie.")
+
+except Exception as e:
+    st.error(f"Błąd silnika obliczeniowego: {e}")
+    st.write("Sprawdź połączenie z yfinance lub zaktualizuj biblioteki.")
