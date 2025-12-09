@@ -4,328 +4,328 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy.stats import linregress, entropy
+from scipy.stats import linregress, entropy, zscore
 from datetime import datetime, timedelta
 
-# --- 1. KONFIGURACJA UI (STYL QUANT HEDGE FUND) ---
-st.set_page_config(layout="wide", page_title="QUANTUM TERMINAL", page_icon="🦅", initial_sidebar_state="collapsed")
+# --- 1. KONFIGURACJA SYSTEMU (UI/UX) ---
+st.set_page_config(layout="wide", page_title="QUANTUM ALPHA NODE", page_icon="🦅", initial_sidebar_state="collapsed")
 
-# CSS: High Density, Dark Mode, Responsywność
+# CSS: Professional Dark Theme & Typography
 st.markdown("""
 <style>
-    /* Baza - Głęboka czerń */
-    .stApp { background-color: #050505; color: #c0c0c0; font-family: 'Roboto Mono', monospace; }
+    /* Główny styl aplikacji */
+    .stApp { background-color: #0b0c10; color: #c5c6c7; font-family: 'Roboto', sans-serif; }
     
-    /* Ukrycie elementów systemowych */
+    /* Ukrycie elementów standardowych */
     header, footer {visibility: hidden;}
-    .block-container { padding-top: 0.5rem; padding-left: 1rem; padding-right: 1rem; max-width: 100%; }
+    .block-container { padding-top: 0.5rem; max-width: 100%; }
     
-    /* Karty KPI - Styl "Glassmorphism" */
+    /* Stylizacja Tabs (Zakładek) */
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px; white-space: pre-wrap; background-color: #1f2833; border-radius: 4px 4px 0px 0px;
+        gap: 1px; padding-top: 10px; padding-bottom: 10px; color: #fff;
+    }
+    .stTabs [aria-selected="true"] { background-color: #45a29e; color: #fff; }
+    
+    /* Metryki KPI */
     div[data-testid="stMetric"] {
-        background-color: #111;
-        border: 1px solid #333;
-        padding: 10px;
-        border-radius: 4px;
-        transition: transform 0.2s;
+        background-color: #1f2833; border: 1px solid #45a29e; padding: 10px; border-radius: 5px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
-    div[data-testid="stMetric"]:hover {
-        border-color: #007bff;
-        transform: scale(1.02);
+    div[data-testid="stMetricLabel"] { font-size: 0.75rem !important; color: #66fcf1; text-transform: uppercase; letter-spacing: 1.2px; }
+    div[data-testid="stMetricValue"] { font-size: 1.5rem !important; color: #fff; font-weight: 700; font-family: 'Consolas', monospace; }
+    
+    /* Tabele Newsów */
+    .news-card {
+        background-color: #1a1a1a; padding: 10px; margin-bottom: 8px; border-left: 3px solid #45a29e; border-radius: 2px;
     }
-    div[data-testid="stMetricLabel"] { font-size: 0.7rem !important; color: #888; text-transform: uppercase; letter-spacing: 1px; }
-    div[data-testid="stMetricValue"] { font-size: 1.3rem !important; color: #fff; font-weight: 600; }
+    .news-title { font-size: 0.9rem; font-weight: bold; color: #e0e0e0; }
+    .news-meta { font-size: 0.7rem; color: #888; margin-top: 4px; }
     
-    /* Wykresy */
-    .js-plotly-plot { border: 1px solid #222; border-radius: 4px; }
-    
-    /* Typografia Nagłówków */
-    h1, h2, h3, h4, h5 { 
-        color: #e0e0e0 !important; 
-        font-family: 'Arial', sans-serif; 
-        text-transform: uppercase; 
-        letter-spacing: 1px; 
-        font-size: 0.9rem !important; 
-        margin-top: 10px;
-        border-left: 3px solid #007bff;
-        padding-left: 10px;
-    }
-    
-    /* Tabela */
-    .dataframe { font-size: 0.8rem; }
+    /* Nagłówki */
+    h3, h4 { color: #66fcf1 !important; text-transform: uppercase; font-size: 1rem !important; border-bottom: 1px solid #333; padding-bottom: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. SILNIK MATEMATYCZNY (JIM SIMONS STYLE) ---
+# --- 2. SILNIK MATEMATYCZNY (QUANT ENGINE) ---
 
 def calculate_hurst(series):
-    """Oblicza wykładnik Hursta (Pamięć Szeregu Czasowego)."""
+    """Oblicza wykładnik Hursta (H) - Miarę pamięci szeregu czasowego."""
     lags = range(2, 20)
-    # Zabezpieczenie przed błędami matematycznymi przy małej zmienności
     try:
         tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
         return poly[0] * 2.0
-    except:
-        return 0.5
-
-def calculate_shannon_entropy(price_series, base=2):
-    """Entropia Shannona - Mierzy chaos w rozkładzie zwrotów.
-    Wysoka entropia = Rynek nieefektywny/Chaotyczny. Niska = Uporządkowany."""
-    data = pd.Series(price_series).pct_change().dropna()
-    # Dyskretyzacja danych do histogramu
-    hist_counts = np.histogram(data, bins=20)[0]
-    # Normalizacja do prawdopodobieństw
-    probs = hist_counts / len(data)
-    # Usunięcie zer dla logarytmu
-    probs = probs[probs > 0]
-    return entropy(probs, base=base)
+    except: return 0.5
 
 def simple_kalman_filter(data, n_iter=5):
-    """Uproszczony filtr wygładzający (Proxy dla filtru Kalmana).
-    Wygładza szum zachowując "szybkość" reakcji lepiej niż SMA."""
-    sz = (n_iter,) 
-    xhat = np.zeros(sz)      # a posteriori estimate of x
-    P = np.zeros(sz)         # a posteriori error estimate
-    xhatminus = np.zeros(sz) # a priori estimate of x
-    Pminus = np.zeros(sz)    # a priori error estimate
-    K = np.zeros(sz)         # gain or blending factor
+    """Estymator trendu (wygładzanie szumu) - Proxy dla filtru Kalmana."""
+    return pd.Series(data).ewm(span=n_iter).mean()
 
-    Q = 1e-5 # process variance
-    R = 0.01**2 # estimate of measurement variance
-
-    xhat = np.array(data)
-    # Prosta implementacja w pętli dla demonstracji idei
-    # W produkcji użyłbym biblioteki pykalman, ale tu robimy pure numpy
-    return pd.Series(data).ewm(span=n_iter).mean() # Zastępczo EWM, który matematycznie jest bliski prostemu Kalmanowi
-
-def get_market_profile(df, price_col='Close', vol_col='Volume', bins=70):
-    """Generuje Volume Profile (Instytucjonalne Poziomy)."""
-    # Obliczamy histogram wolumenu
-    price_hist, bin_edges = np.histogram(df[price_col], bins=bins, weights=df[vol_col])
-    return price_hist, bin_edges
-
-@st.cache_data(ttl=300)
-def get_quant_data(ticker):
-    # Pobieramy dane + Benchmarki Makro
-    tickers_list = f"{ticker} DX-Y.NYB ^TNX"
-    try:
-        data = yf.download(tickers_list, period="1y", interval="1d", group_by='ticker', progress=False)
-    except Exception:
-        st.error("Błąd połączenia z API.")
-        return None, None
-
-    # Obsługa MultiIndex (dla yfinance > 0.2)
-    if isinstance(data.columns, pd.MultiIndex):
-        df = data[ticker].copy()
-        macro_dxy = data['DX-Y.NYB']['Close'] if 'DX-Y.NYB' in data.columns.levels[0] else None
-    else:
-        df = data # Fallback dla pojedynczego tickera
-        macro_dxy = None
-
-    # Inżynieria Cech (Feature Engineering)
-    df['Returns'] = df['Close'].pct_change()
-    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-    
-    # 1. Zmienność Realizowana (Annualizowana)
-    df['Volatility'] = df['Log_Ret'].rolling(window=20).std() * np.sqrt(252)
-    
-    # 2. Filtr Kalmana (Estymacja Trendu)
-    df['Kalman_Price'] = simple_kalman_filter(df['Close'].values)
-    
-    # 3. VWAP (Volume Weighted Average Price)
+def calculate_vwap(df):
+    """Volume Weighted Average Price - Benchmark instytucjonalny."""
     v = df['Volume'].values
     tp = (df['High'] + df['Low'] + df['Close']) / 3
-    df['VWAP'] = (tp * v).cumsum() / v.cumsum()
-    
-    # Dane Makro (Ostatnie 60 dni do korelacji)
-    macro_df = pd.DataFrame({
-        'ASSET': df['Close'],
-        'USD_IDX': macro_dxy if macro_dxy is not None else df['Close'] # Fallback
-    }).tail(60).fillna(method='ffill')
-    
-    return df, macro_df
+    return df.assign(VWAP=(tp * v).cumsum() / v.cumsum())
 
-# --- 3. DASHBOARD GŁÓWNY ---
+def get_market_profile(df, bins=50):
+    """Tworzy profil wolumenu (rozkład ceny)."""
+    price_hist, bin_edges = np.histogram(df['Close'], bins=bins, weights=df['Volume'])
+    return price_hist, bin_edges
 
-# Sidebar: Tylko niezbędne kontrolki
+@st.cache_data(ttl=60) # Szybkie odświeżanie dla Daytradingu
+def get_data_bundle(ticker, interval="15m", period="5d"):
+    """Pobiera dane dla głównego interwału oraz kontekst makro."""
+    
+    # 1. Dane Główne (Intraday)
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+        if df.empty: return None, None, None
+    except: return None, None, None
+
+    # Inżynieria Cech
+    df['Kalman'] = simple_kalman_filter(df['Close'].values)
+    df = calculate_vwap(df)
+    df['Returns'] = df['Close'].pct_change()
+    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+    df['Vol_Ann'] = df['Log_Ret'].rolling(20).std() * np.sqrt(252 if interval=='1d' else 252*78) # Approx intraday vol
+    
+    # 2. Dane Contextowe (Daily - dla RRG i korelacji)
+    context_tickers = f"{ticker} ^GSPC ^TNX DX-Y.NYB BTC-USD"
+    df_context = yf.download(context_tickers, period="60d", interval="1d", group_by='ticker', progress=False)
+    
+    # 3. Pobranie obiektu Ticker dla Newsów i Kalendarza
+    ticker_obj = yf.Ticker(ticker)
+    
+    return df, df_context, ticker_obj
+
+# --- 3. DASHBOARD LOGIC ---
+
+# Sidebar Konfiguracja
 with st.sidebar:
-    st.markdown("## 📡 QUANT CONTROL")
-    ticker = st.text_input("SYMBOL (Yahoo)", value="EURUSD=X")
-    st.info("💡 **Wskazówka:** Użyj 'GC=F' dla Złota, 'BTC-USD' dla Bitcoina.")
+    st.title("🎛️ STEROWNIA")
+    ticker_input = st.text_input("AKTYWO", value="EURUSD=X")
+    timeframe = st.selectbox("INTERWAŁ (Day Trading)", ["1m", "5m", "15m", "1h", "1d"], index=2)
+    st.info("ℹ️ 1m/5m dostępne tylko dla ostatnich 7 dni (ograniczenie API Yahoo).")
 
-try:
-    with st.spinner('Analiza danych kwantowych...'):
-        df, macro_df = get_quant_data(ticker)
+# Pobieranie danych
+with st.spinner('Synchronizacja z rynkiem...'):
+    df, df_context, ticker_obj = get_data_bundle(ticker_input, interval=timeframe, period="5d" if timeframe in ["1m", "5m", "15m"] else "60d")
 
-    if df is not None:
-        last_close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2]
-        change_pct = (last_close - prev_close) / prev_close
-        
-        # --- A. PANEL KPI (Najważniejsze liczby) ---
-        c1, c2, c3, c4, c5 = st.columns(5)
-        
-        c1.metric("Cena Rynkowa", f"{last_close:.4f}", f"{change_pct:.2%}")
-        
-        # Obliczenia zaawansowane
-        hurst = calculate_hurst(df['Close'].tail(100).values)
-        entropy_val = calculate_shannon_entropy(df['Close'].tail(50))
-        volatility = df['Volatility'].iloc[-1]
-        
-        # Logika kolorów i opisów
-        hurst_desc = "TREND (Momentum)" if hurst > 0.55 else "MEAN REV (Konsola)" if hurst < 0.45 else "SZUM (Random)"
-        entropy_desc = "CHAOS" if entropy_val > 3.0 else "STRUKTURA"
-        
-        c2.metric("Wykładnik Hursta", f"{hurst:.2f}", hurst_desc, 
-                  help="H > 0.5: Rynek trenduje. H < 0.5: Rynek wraca do średniej. H = 0.5: Błądzenie losowe.")
-        
-        c3.metric("Entropia (Informacja)", f"{entropy_val:.2f}", entropy_desc, delta_color="inverse",
-                  help="Mierzy nieuporządkowanie. Niski wynik = silna struktura/trend. Wysoki wynik = nieprzewidywalność.")
-        
-        c4.metric("Zmienność (Roczna)", f"{volatility*100:.1f}%", "Ryzyko", delta_color="off")
-        
-        # Z-Score (Odchylenie od średniej)
-        z_score = (last_close - df['Close'].rolling(50).mean().iloc[-1]) / df['Close'].rolling(50).std().iloc[-1]
-        z_col = "normal" if abs(z_score) < 2 else "inverse"
-        c5.metric("Statystyczny Z-Score", f"{z_score:.2f}σ", "Odchylenie", delta_color=z_col,
-                  help="Ile odchyleń standardowych cena jest od średniej. Powyżej 2.0 = Statystycznie Drogie (Sprzedaj).")
+if df is not None and not df.empty:
+    
+    # Ostatnie ceny
+    last_price = df['Close'].iloc[-1]
+    prev_price = df['Close'].iloc[-2]
+    delta = last_price - prev_price
+    delta_pct = delta / prev_price
+    
+    # --- HEADER: KPI & ALERTS ---
+    c1, c2, c3, c4, c5 = st.columns(5)
+    
+    c1.metric(f"{ticker_input} ({timeframe})", f"{last_price:.4f}", f"{delta_pct:.2%}")
+    
+    # Hurst (Fraktal)
+    hurst = calculate_hurst(df['Close'].tail(50).values)
+    hurst_state = "TRENDUJĄCY" if hurst > 0.55 else "KONSOLIDACJA" if hurst < 0.45 else "LOSOWY"
+    c2.metric("Charakter Rynku (Hurst)", f"{hurst:.2f}", hurst_state, delta_color="off")
+    
+    # Volatility
+    vol = df['Vol_Ann'].iloc[-1]
+    c3.metric("Zmienność (Implied)", f"{vol*100:.2f}%", "Ryzyko")
+    
+    # Z-Score (Statystyczne Odchylenie)
+    z_score = (last_price - df['Close'].rolling(50).mean().iloc[-1]) / df['Close'].rolling(50).std().iloc[-1]
+    c4.metric("Z-Score (50 okresów)", f"{z_score:.2f}σ", "Overbought" if z_score > 2 else "Oversold" if z_score < -2 else "Fair", delta_color="inverse")
+    
+    # Bias (Trend Filtru Kalmana)
+    kalman_slope = df['Kalman'].iloc[-1] - df['Kalman'].iloc[-2]
+    bias = "BYCZY (Wzrosty)" if kalman_slope > 0 else "NIEDŹWIEDZI (Spadki)"
+    c5.metric("Bias (Kalman Filter)", bias, f"{kalman_slope:.5f}", delta_color="normal")
 
-        st.markdown("---")
+    st.markdown("---")
 
-        # --- B. GŁÓWNY MODUŁ ANALITYCZNY ---
-        col_main, col_tools = st.columns([3, 1])
+    # --- MAIN TABS (STRUKTURA ZAKŁADEK) ---
+    tab_chart, tab_intel, tab_quant = st.tabs(["📊 ANALIZA TECHNICZNA & WOLUMEN", "📰 INTELLIGENCE & NEWS", "🧮 QUANT LAB (RRG)"])
 
+    # === TAB 1: WYKRES & WOLUMEN ===
+    with tab_chart:
+        col_main, col_profile = st.columns([5, 1])
+        
         with col_main:
-            st.markdown(f"### 🧬 STRUKTURA CENY I FILTR KALMANA ({ticker})")
+            # Subploty: Cena + Wolumen
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
             
-            # Zaawansowany wykres z Volume Profile
-            fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[0.85, 0.15], 
-                                horizontal_spacing=0.01)
-
             # 1. Świece
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
-                                         low=df['Low'], close=df['Close'], name='Cena'), row=1, col=1)
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Cena'), row=1, col=1)
+            # 2. Kalman (Trend)
+            fig.add_trace(go.Scatter(x=df.index, y=df['Kalman'], mode='lines', line=dict(color='#f1c40f', width=2), name='Kalman Filter'), row=1, col=1)
+            # 3. VWAP
+            fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', line=dict(color='#00d2d3', width=1.5, dash='dot'), name='VWAP'), row=1, col=1)
             
-            # 2. Filtr Kalmana (Trend) - Złota linia
-            fig.add_trace(go.Scatter(x=df.index, y=df['Kalman_Price'], mode='lines', 
-                                     line=dict(color='#ffd700', width=2), name='Kalman Filter'), row=1, col=1)
+            # 4. Wolumen (Kolorowany zmianą ceny)
+            colors = ['#2ecc71' if r >= 0 else '#e74c3c' for r in df['Returns']]
+            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Wolumen'), row=2, col=1)
             
-            # 3. VWAP - Niebieska linia
-            fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], mode='lines', 
-                                     line=dict(color='#00f2ff', width=1.5, dash='dot'), name='VWAP'), row=1, col=1)
-
-            # 4. Volume Profile (Boczny Histogram)
-            hist, bin_edges = get_market_profile(df.tail(120)) 
+            fig.update_layout(template='plotly_dark', height=600, margin=dict(l=0, r=0, t=10, b=0), showlegend=False, xaxis_rangeslider_visible=False, paper_bgcolor='#0b0c10', plot_bgcolor='#131416')
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with col_profile:
+            st.markdown("### 🧬 PROFILE")
+            # Volume Profile
+            hist, bin_edges = get_market_profile(df.tail(100)) # Profil z ostatnich 100 świec
             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
             
-            # Kolorowanie Volume Profile (Gradient)
-            fig.add_trace(go.Bar(x=hist, y=bin_centers, orientation='h', 
-                                 marker=dict(color=hist, colorscale='Electric'), name='Płynność'), row=1, col=2)
-
-            # Poziom POC (Point of Control)
+            # Znalezienie POC (Point of Control)
             poc_idx = np.argmax(hist)
             poc_price = bin_centers[poc_idx]
-            fig.add_hline(y=poc_price, line_dash="dash", line_color="white", line_width=1, 
-                          annotation_text="POC (Max Vol)", annotation_position="bottom right", row=1, col=1)
+            
+            fig_vp = go.Figure(go.Bar(
+                x=hist, y=bin_centers, orientation='h',
+                marker=dict(color=hist, colorscale='Tealgrn'), name='Volume Profile'
+            ))
+            fig_vp.add_hline(y=poc_price, line_dash="dash", line_color="white", annotation_text="POC")
+            
+            fig_vp.update_layout(template='plotly_dark', height=600, margin=dict(l=0,r=0,t=30,b=0), showlegend=False, xaxis_visible=False)
+            st.plotly_chart(fig_vp, use_container_width=True)
+            
+            st.caption(f"**POC (Point of Control):** {poc_price:.4f}")
+            st.caption("Poziom, na którym wymieniono najwięcej kontraktów. Działa jak magnes.")
 
-            # Ustawienia Wykresu
-            fig.update_layout(
-                template='plotly_dark', height=550, 
-                xaxis_rangeslider_visible=False, 
-                margin=dict(l=0, r=0, t=20, b=20),
-                showlegend=False,
-                paper_bgcolor='#0a0a0a', plot_bgcolor='#0a0a0a',
-                hovermode="x unified"
-            )
-            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#222')
-            fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#222')
-            fig.update_xaxes(showticklabels=False, row=1, col=2) # Ukryj oś X dla profilu
-            
-            st.plotly_chart(fig, use_container_width=True)
+    # === TAB 2: INTELLIGENCE & NEWS ===
+    with tab_intel:
+        c_news, c_cal = st.columns([2, 1])
+        
+        with c_news:
+            st.markdown("### 📡 NAJNOWSZE WIADOMOŚCI (LIVE)")
+            try:
+                news_list = ticker_obj.news
+                if news_list:
+                    for news in news_list[:5]: # Top 5 newsów
+                        # Konwersja timestamp
+                        pub_time = datetime.fromtimestamp(news['providerPublishTime']).strftime('%Y-%m-%d %H:%M')
+                        st.markdown(f"""
+                        <div class="news-card">
+                            <div class="news-title"><a href="{news['link']}" target="_blank" style="text-decoration:none; color:#e0e0e0;">{news['title']}</a></div>
+                            <div class="news-meta">🕒 {pub_time} | 📢 {news['publisher']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("Brak najnowszych wiadomości dla tego waloru w API.")
+            except Exception as e:
+                st.error(f"Błąd modułu newsów: {e}")
 
-        with col_tools:
-            # --- NARZĘDZIA QUANT ---
-            
-            # 1. Regresja Liniowa
-            st.markdown("### 📐 KANAŁ REGRESJI")
-            
-            df_reg = df.reset_index().tail(60) # Ostatnie 60 sesji
-            x = np.arange(len(df_reg))
-            slope, intercept, r_value, p_value, std_err = linregress(x, df_reg['Close'])
-            
-            reg_line = slope * x + intercept
-            std_dev = df_reg['Close'].std()
-            
-            # Mini wykres regresji
-            fig_reg = go.Figure()
-            fig_reg.add_trace(go.Scatter(x=x, y=df_reg['Close'], mode='lines', line=dict(color='#555')))
-            fig_reg.add_trace(go.Scatter(x=x, y=reg_line, line=dict(color='yellow', dash='dash'), name='Mean'))
-            fig_reg.add_trace(go.Scatter(x=x, y=reg_line + 2*std_dev, line=dict(color='red', width=1), name='+2σ'))
-            fig_reg.add_trace(go.Scatter(x=x, y=reg_line - 2*std_dev, line=dict(color='green', width=1), fill='tonexty', fillcolor='rgba(255,255,255,0.05)', name='-2σ'))
-            
-            fig_reg.update_layout(template='plotly_dark', height=200, margin=dict(l=0,r=0,t=0,b=0), showlegend=False)
-            fig_reg.update_xaxes(visible=False)
-            fig_reg.update_yaxes(visible=False)
-            st.plotly_chart(fig_reg, use_container_width=True)
-            
-            st.caption(f"Nachylenie (Slope): {slope:.4f} | R²: {r_value**2:.2f}")
+        with c_cal:
+            st.markdown("### 📅 KALENDARZ EKONOMICZNY")
+            st.caption("Najbliższe wydarzenia (Earnings/Splits)")
+            try:
+                cal = ticker_obj.calendar
+                if cal is not None and not cal.empty:
+                    st.dataframe(cal, use_container_width=True)
+                else:
+                    st.write("Brak nadchodzących wydarzeń korporacyjnych.")
+            except:
+                st.write("Dane kalendarza niedostępne.")
             
             st.markdown("---")
-            
-            # 2. Korelacja z USD
-            st.markdown("### 🔗 KORELACJA MAKRO")
-            if 'USD_IDX' in macro_df.columns:
-                corr = macro_df.corr().iloc[0,1]
-                st.metric("Korelacja z DXY (USD)", f"{corr:.2f}")
-                if corr < -0.7:
-                    st.warning("⚠️ Silna odwrotna korelacja z USD. Obserwuj DXY!")
-                elif corr > 0.7:
-                    st.warning("⚠️ Nietypowa dodatnia korelacja z USD!")
-                else:
-                    st.info("ℹ️ Rynek porusza się niezależnie.")
+            st.markdown("### 🌍 FOREX HEATMAP (D1)")
+            # Prosta heatmapa korelacji z kontekstu
+            if 'Close' in df_context:
+                # Obsługa MultiIndex dla wielu tickerów
+                try:
+                    # Sprawdzenie czy df_context ma poziomy (zależy od wersji yfinance)
+                    if isinstance(df_context.columns, pd.MultiIndex):
+                        corr_data = df_context.xs('Close', level=1, axis=1).corr()
+                    else:
+                        corr_data = df_context['Close'].corr() if 'Close' in df_context else df_context.corr()
+                    
+                    fig_corr = go.Figure(data=go.Heatmap(
+                        z=corr_data.values, x=corr_data.columns, y=corr_data.columns,
+                        colorscale='RdBu', zmin=-1, zmax=1
+                    ))
+                    fig_corr.update_layout(height=300, margin=dict(l=0,r=0,t=0,b=0))
+                    st.plotly_chart(fig_corr, use_container_width=True)
+                except Exception as e:
+                    st.warning("Nie można wygenerować korelacji (zbyt mało danych).")
 
-        # --- C. DOLNY PANEL SYGNAŁOWY ---
-        st.markdown("---")
-        c_bot1, c_bot2 = st.columns(2)
+    # === TAB 3: QUANT LAB (RRG) ===
+    with tab_quant:
+        st.markdown("### 🌀 RELATIVE ROTATION GRAPH (RRG Concept)")
+        st.markdown("""
+        **Jak czytać ten wykres?**
+        * **Oś X (RS-Ratio):** Siła trendu względem S&P 500. (Prawo = Silniejszy niż rynek).
+        * **Oś Y (RS-Momentum):** Dynamika zmian tej siły. (Góra = Nabiera rozpędu).
+        * **Ćwiartki:** 🟢 Leading (Liderzy) | 🟡 Weakening (Słabnący) | 🔴 Lagging (Maruderzy) | 🔵 Improving (Poprawiający się).
+        """)
         
-        with c_bot1:
-            st.markdown("### 🧠 LOG SYGNAŁÓW (SIMONS MODEL)")
+        # Symulacja RRG (prawdziwe wymagałoby bardzo złożonych obliczeń historycznych benchmarków)
+        # Tutaj robimy uproszczony model: Return vs Volatility jako proxy dla Momentum vs Risk
+        
+        col_rrg, col_metrics = st.columns([3, 1])
+        
+        with col_rrg:
+            # Przygotowanie danych do Scatter Plot
+            rrg_data = []
+            tickers_rrg = [ticker_input, "BTC-USD", "EURUSD=X", "GC=F", "^GSPC", "NVDA"]
             
-            # Logika decyzyjna
-            signals = []
+            # Pobieramy dane snapshotowe (ostatnie 20 dni)
+            data_rrg = yf.download(tickers_rrg, period="20d", interval="1d", progress=False)['Close']
             
-            # Sygnał 1: Ekstremum Statystyczne
-            if z_score > 2.0: signals.append("🔴 SHORT: Cena jest statystycznie 'Droga' (>2σ)")
-            elif z_score < -2.0: signals.append("🟢 LONG: Cena jest statystycznie 'Tania' (<-2σ)")
+            for t in tickers_rrg:
+                if t in data_rrg.columns:
+                    series = data_rrg[t]
+                    ret = (series.iloc[-1] / series.iloc[0]) - 1 # Total Return
+                    vol = series.pct_change().std() * np.sqrt(252) # Volatility
+                    
+                    # Normalizacja dla wykresu (symulacja środka wykresu)
+                    rrg_data.append({
+                        "Ticker": t,
+                        "Return (Trend)": ret * 100,
+                        "Risk (Vol)": vol * 100,
+                        "Color": "cyan" if t == ticker_input else "gray"
+                    })
             
-            # Sygnał 2: Charakter Rynku (Hurst)
-            if hurst > 0.6: signals.append("🌊 STRUKTURA: Silny Trend. Graj z ruchem (Breakout).")
-            elif hurst < 0.4: signals.append("🏓 STRUKTURA: Konsolidacja. Kupuj dołki, sprzedawaj szczyty.")
+            df_rrg = pd.DataFrame(rrg_data)
             
-            # Sygnał 3: Entropia
-            if entropy_val > 2.8: signals.append("⚠️ OSTRZEŻENIE: Wysoka Entropia (Chaos). Zredukuj wielkość pozycji.")
+            fig_rrg = go.Figure()
             
-            if signals:
-                for sig in signals:
-                    st.write(sig)
-            else:
-                st.write("⚪ BRAK CZYSTYCH SYGNAŁÓW. Czekaj na przewagę statystyczną.")
-
-        with c_bot2:
-            st.markdown("### 🕒 SEZONOWOŚĆ (HEATMAPA)")
-            st.caption("Symulacja rozkładu zwrotów (Concept Placeholder). Szukaj zielonych pól.")
-            # Generowanie heatmapy "Quantum"
-            mock_data = np.random.randn(5, 24)
-            fig_heat = go.Figure(data=go.Heatmap(
-                z=mock_data, 
-                colorscale="Viridis",
-                x=[f"{i}:00" for i in range(24)],
-                y=['Pon', 'Wt', 'Śr', 'Czw', 'Pt'],
-                showscale=False
+            # Osie ćwiartek
+            fig_rrg.add_vline(x=df_rrg['Return (Trend)'].mean(), line_dash="dot", line_color="#555")
+            fig_rrg.add_hline(y=df_rrg['Risk (Vol)'].mean(), line_dash="dot", line_color="#555")
+            
+            fig_rrg.add_trace(go.Scatter(
+                x=df_rrg['Return (Trend)'],
+                y=df_rrg['Risk (Vol)'],
+                mode='markers+text',
+                text=df_rrg['Ticker'],
+                textposition="top center",
+                marker=dict(size=15, color=df_rrg['Color'].map(lambda x: '#45a29e' if x=='cyan' else '#666'))
             ))
-            fig_heat.update_layout(template='plotly_dark', height=180, margin=dict(l=0,r=0,t=0,b=0))
-            st.plotly_chart(fig_heat, use_container_width=True)
+            
+            fig_rrg.update_layout(
+                template='plotly_dark',
+                title="Risk vs Return Map (20D)",
+                xaxis_title="Zwrot (Trend) %",
+                yaxis_title="Ryzyko (Zmienność) %",
+                height=500,
+                paper_bgcolor='#0b0c10',
+                plot_bgcolor='#131416'
+            )
+            st.plotly_chart(fig_rrg, use_container_width=True)
 
-except Exception as e:
-    st.error(f"SYSTEM FAILURE: {e}")
-    st.write("Sprawdź połączenie z internetem lub poprawność symbolu.")
+        with col_metrics:
+            st.markdown("#### 🔬 STATYSTYKA")
+            st.info("Powyższa mapa pomaga zidentyfikować, czy handlujesz aktywem, które jest aktualnie 'w grze'. Idealnie chcesz być w prawym dolnym rogu (Wysoki Zwrot, Niskie Ryzyko) lub prawym górnym (Momentum).")
+            
+            entropy_val = entropy(df['Close'].pct_change().dropna().abs())
+            st.metric("Entropia Shannona", f"{entropy_val:.2f}", "Poziom Chaosu")
+            
+            if entropy_val > 4.5:
+                st.warning("⚠️ Rynek wysoce chaotyczny! Zmniejsz stawki.")
+            else:
+                st.success("✅ Rynek uporządkowany. Systemy trendowe skuteczne.")
+
+else:
+    st.error("Brak danych. Sprawdź symbol (np. EURUSD=X) lub połączenie internetowe.")
