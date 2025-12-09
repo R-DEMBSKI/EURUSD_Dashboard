@@ -3,232 +3,252 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from sklearn.linear_model import LinearRegression
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from scipy.stats import norm
 from datetime import datetime, timedelta
+import time
 
-# --- 1. KONFIGURACJA UI (BLOOMBERG STYLE) ---
-st.set_page_config(layout="wide", page_title="QUANT LAB PRO", page_icon="🦅")
+# --- 1. KONFIGURACJA UI (STYL TWS/BLOOMBERG) ---
+st.set_page_config(layout="wide", page_title="TWS PRO SIMULATOR", page_icon="📈")
 
+# CSS: Totalna konwersja wyglądu na styl Interactive Brokers
 st.markdown("""
 <style>
-    /* Dark Mode Terminal Vibe */
-    .stApp { background-color: #000000; color: #e0e0e0; }
+    /* Główne tło - Ciemny Szary TWS */
+    .stApp { background-color: #1a1a1a; color: #e0e0e0; font-family: 'Arial', sans-serif; }
     
-    /* Metrics Styling */
-    div[data-testid="stMetric"] {
-        background-color: #111111;
-        border: 1px solid #333;
-        padding: 10px;
+    /* Ukrycie paska Streamlit */
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Kontenery (Moduły) */
+    .css-1r6slb0, .css-12oz5g7 { padding: 0px 1rem; }
+    
+    /* Stylizacja Przycisków BUY/SELL */
+    div.stButton > button:first-child {
         border-radius: 4px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
-    div[data-testid="stMetricValue"] {
-        font-family: 'Consolas', 'Courier New', monospace;
-        font-size: 1.5rem !important;
-    }
-    
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background-color: #0a0a0a;
-        border-right: 1px solid #333;
+        font-weight: bold;
+        border: none;
+        width: 100%;
+        padding: 10px;
     }
     
-    /* Custom Headers */
-    h1, h2, h3 { 
-        color: #00ff88 !important; 
-        font-family: 'Roboto Mono', monospace; 
-        text-transform: uppercase;
-        letter-spacing: 1px;
+    /* Inputy numeryczne (wygląd terminala) */
+    div[data-testid="stNumberInput"] input {
+        background-color: #000;
+        color: #fff;
+        border: 1px solid #444;
+        font-family: 'Consolas', monospace;
     }
     
-    /* Plotly Chart Container */
-    .js-plotly-plot { border: 1px solid #222; }
+    /* Tabele (Dataframes) */
+    div[data-testid="stDataFrame"] {
+        font-size: 0.8rem;
+    }
+    
+    /* Nagłówki modułów */
+    h3 {
+        font-size: 1rem !important;
+        background-color: #2d2d2d;
+        padding: 5px 10px;
+        border-top: 2px solid #007bff; /* Niebieska linia TWS */
+        margin-bottom: 10px;
+        color: white !important;
+        font-weight: 600;
+    }
+    
+    /* Kolorystyka zysków i strat */
+    .positive { color: #00ff00; font-weight: bold; }
+    .negative { color: #ff3333; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. SIDEBAR - STEROWANIE ---
-with st.sidebar:
-    st.header("⚙️ PARAMETRY FUNDUSZU")
-    selected_asset = st.selectbox("Aktywo Główne", ["EURUSD=X", "GBPUSD=X", "BTC-USD", "GC=F", "^GSPC"])
-    lookback = st.slider("Okres Analizy (Dni)", 30, 730, 365)
+# --- 2. LOGIKA SYMULATORA PORTFELA (SESSION STATE) ---
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = pd.DataFrame(columns=['Symbol', 'Qty', 'Avg Price', 'Value', 'Unrealized P&L'])
+if 'cash' not in st.session_state:
+    st.session_state.cash = 100000.0  # Wirtualne 100k USD
+if 'trade_log' not in st.session_state:
+    st.session_state.trade_log = []
+
+# --- 3. POBIERANIE DANYCH (YFINANCE) ---
+@st.cache_data(ttl=60) # Odświeżanie co minutę
+def get_market_data(ticker):
+    data = yf.download(ticker, period="5d", interval="15m", progress=False)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.droplevel(1)
     
+    # Proste wskaźniki
+    data['SMA20'] = data['Close'].rolling(20).mean()
+    data['Upper'] = data['SMA20'] + 2*data['Close'].rolling(20).std()
+    data['Lower'] = data['SMA20'] - 2*data['Close'].rolling(20).std()
+    return data
+
+# --- 4. LAYOUT GŁÓWNY ---
+# Podział na 2 główne kolumny: LEWA (Order + Chart) i PRAWA (Portfolio + News)
+col_left, col_right = st.columns([4, 6], gap="small")
+
+ticker = "EURUSD=X" # Domyślny ticker
+data = get_market_data(ticker)
+current_price = data['Close'].iloc[-1]
+prev_close = data['Close'].iloc[-2]
+pct_change = (current_price - prev_close) / prev_close
+
+# === LEWA KOLUMNA: ORDER ENTRY & CHART ===
+with col_left:
+    # A. ORDER ENTRY PANEL (Niebieski nagłówek)
+    st.markdown("### 🛒 ORDER ENTRY (SIMULATION)")
+    
+    # Wiersz z tickerem i ceną
+    c1, c2, c3 = st.columns([2, 2, 2])
+    c1.text_input("Symbol", value="EURUSD", disabled=True)
+    color_price = "green" if pct_change > 0 else "red"
+    c2.markdown(f"<div style='text-align:center; font-size:1.5em; color:{color_price}; font-family:monospace'>{current_price:.5f}</div>", unsafe_allow_html=True)
+    c3.markdown(f"<div style='text-align:center; color:{color_price}'>{pct_change:.2%}</div>", unsafe_allow_html=True)
+    
+    # Parametry zlecenia
     st.markdown("---")
-    st.markdown("### 📡 Feed Status")
-    st.success("IBKR API: DISCONNECTED (Sim Mode)")
-    st.success("Yahoo Data: CONNECTED")
+    qc1, qc2 = st.columns(2)
+    qty = qc1.number_input("QTY", min_value=1000, value=10000, step=1000)
+    order_type = qc2.selectbox("Type", ["MKT", "LMT (Simulated)"])
+    
+    # Przyciski akcji
+    b1, b2 = st.columns(2)
+    
+    # Logika BUY
+    if b1.button("BUY 🔵", use_container_width=True):
+        cost = qty * current_price
+        if st.session_state.cash >= cost:
+            st.session_state.cash -= cost
+            
+            # Dodaj do portfela
+            new_trade = pd.DataFrame([{
+                'Symbol': ticker, 'Qty': qty, 'Avg Price': current_price, 
+                'Value': cost, 'Unrealized P&L': 0.0
+            }])
+            
+            if ticker in st.session_state.portfolio['Symbol'].values:
+                # Uśrednianie ceny (proste)
+                idx = st.session_state.portfolio[st.session_state.portfolio['Symbol'] == ticker].index[0]
+                old_qty = st.session_state.portfolio.at[idx, 'Qty']
+                old_val = st.session_state.portfolio.at[idx, 'Value']
+                st.session_state.portfolio.at[idx, 'Qty'] += qty
+                st.session_state.portfolio.at[idx, 'Value'] += cost
+                st.session_state.portfolio.at[idx, 'Avg Price'] = (old_val + cost) / (old_qty + qty)
+            else:
+                st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_trade], ignore_index=True)
+                
+            st.success(f"BOUGHT {qty} @ {current_price:.5f}")
+            st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M:%S')} BUY {qty} {ticker} @ {current_price}")
+        else:
+            st.error("INSUFFICIENT FUNDS")
 
-# --- 3. SILNIK DANYCH (ROZSZERZONY) ---
-@st.cache_data(ttl=300)
-def get_data(ticker, period_days):
-    # Pobieranie głównego aktywa
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=period_days)
-    
-    # Główne dane (OHLC)
-    df = yf.download(ticker, start=start_date, end=end_date, interval="1d", progress=False)
-    
-    # Flatten columns for newer yfinance versions
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-        
-    df['Returns'] = df['Close'].pct_change()
-    df['Vol'] = df['Returns'].rolling(20).std()
-    
-    # Wskaźniki Techniczne do wykresu
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-    
-    # Bollinger Bands
-    df['BB_Mid'] = df['Close'].rolling(20).mean()
-    df['BB_Std'] = df['Close'].rolling(20).std()
-    df['BB_Upper'] = df['BB_Mid'] + (2 * df['BB_Std'])
-    df['BB_Lower'] = df['BB_Mid'] - (2 * df['BB_Std'])
-    
-    df = df.dropna()
+    # Logika SELL (Zamknięcie pozycji)
+    if b2.button("SELL 🔴", type="primary", use_container_width=True):
+        if ticker in st.session_state.portfolio['Symbol'].values:
+            idx = st.session_state.portfolio[st.session_state.portfolio['Symbol'] == ticker].index[0]
+            current_qty = st.session_state.portfolio.at[idx, 'Qty']
+            
+            if current_qty >= qty:
+                revenue = qty * current_price
+                st.session_state.cash += revenue
+                st.session_state.portfolio.at[idx, 'Qty'] -= qty
+                st.session_state.portfolio.at[idx, 'Value'] -= (qty * st.session_state.portfolio.at[idx, 'Avg Price'])
+                
+                # Usuń jeśli 0
+                if st.session_state.portfolio.at[idx, 'Qty'] == 0:
+                    st.session_state.portfolio = st.session_state.portfolio.drop(idx)
+                
+                st.warning(f"SOLD {qty} @ {current_price:.5f}")
+                st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M:%S')} SELL {qty} {ticker} @ {current_price}")
+            else:
+                st.error("NOT ENOUGH SHARES")
+        else:
+            st.error("NO POSITION")
 
-    # Dane Makro do korelacji (Benchmarki)
-    tickers_macro = ["DX-Y.NYB", "^TNX", "^VIX", "BTC-USD"]
-    data_macro = yf.download(tickers_macro, period="1y", interval="1d", progress=False)['Close']
+    # B. CHART PANEL
+    st.markdown("### 📉 CHART (15m)")
     
-    # Dane intraday do Heatmapy
-    data_h = yf.download(ticker, period="59d", interval="1h", progress=False)
-    if isinstance(data_h.columns, pd.MultiIndex):
-        data_h.columns = data_h.columns.droplevel(1)
-        
-    return df, data_macro, data_h
+    fig = go.Figure()
+    
+    # Świece
+    fig.add_trace(go.Candlestick(x=data.index,
+                    open=data['Open'], high=data['High'],
+                    low=data['Low'], close=data['Close'],
+                    name='Price'))
+    
+    # Bollinger (Subtelne)
+    fig.add_trace(go.Scatter(x=data.index, y=data['Upper'], line=dict(color='rgba(255,255,255,0.2)', width=1), showlegend=False))
+    fig.add_trace(go.Scatter(x=data.index, y=data['Lower'], line=dict(color='rgba(255,255,255,0.2)', width=1), fill='tonexty', fillcolor='rgba(255,255,255,0.05)', showlegend=False))
 
-# --- 4. ALGORYTMY QUANTOWE (TWOJE + ULEPSZENIA) ---
-
-def calculate_hurst(series):
-    lags = range(2, 100)
-    # Zabezpieczenie przed zerami
-    tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
-    poly = np.polyfit(np.log(lags), np.log(tau), 1)
-    return poly[0] * 2.0
-
-def detect_regime(df):
-    X = df[['Returns', 'Vol']].copy()
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    df['Regime'] = kmeans.fit_predict(X_scaled)
-    return df['Regime'].iloc[-1]
-
-# --- 5. DASHBOARD LAYOUT ---
-
-try:
-    df, df_macro, df_h = get_data(selected_asset, lookback)
-    
-    # A. NAGŁÓWEK TYPU "HEADS-UP DISPLAY"
-    c1, c2, c3, c4, c5 = st.columns(5)
-    
-    curr_price = df['Close'].iloc[-1]
-    prev_price = df['Close'].iloc[-2]
-    delta = curr_price - prev_price
-    
-    hurst = calculate_hurst(df['Close'].values)
-    regime = detect_regime(df)
-    
-    c1.metric(f"{selected_asset}", f"{curr_price:.4f}", f"{delta:.4f}")
-    c2.metric("Hurst Exp (Fraktal)", f"{hurst:.2f}", "Trend" if hurst > 0.55 else "Mean Rev")
-    c3.metric("Volatility (20d)", f"{df['Vol'].iloc[-1]*100:.2f}%")
-    c4.metric("Market Regime", f"Cluster #{regime}")
-    
-    # RSI Calculation (Szybkie)
-    delta_close = df['Close'].diff()
-    gain = (delta_close.where(delta_close > 0, 0)).rolling(14).mean()
-    loss = (-delta_close.where(delta_close < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs)).iloc[-1]
-    c5.metric("RSI (14)", f"{rsi:.1f}", "Overbought" if rsi>70 else "Oversold" if rsi<30 else "Neutral")
-
-    # B. GŁÓWNY PANEL CHARTINGOWY
-    st.markdown("---")
-    col_chart, col_stats = st.columns([3, 1])
-    
-    with col_chart:
-        st.subheader(f"📊 {selected_asset} PRICE ACTION & ALGO LEVELS")
-        
-        fig = go.Figure()
-        
-        # Candlestick
-        fig.add_trace(go.Candlestick(x=df.index,
-                        open=df['Open'], high=df['High'],
-                        low=df['Low'], close=df['Close'],
-                        name='OHLC'))
-        
-        # Bollinger Bands
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(255, 255, 255, 0.3)', width=1), name='BB Upper'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(255, 255, 255, 0.3)', width=1), name='BB Lower', fill='tonexty', fillcolor='rgba(255, 255, 255, 0.05)'))
-        
-        # SMAs
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], line=dict(color='orange', width=1), name='SMA 50'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_200'], line=dict(color='blue', width=2), name='SMA 200'))
-        
-        fig.update_layout(
-            template='plotly_dark',
-            height=600,
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=0, r=0, t=0, b=0),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_stats:
-        st.subheader("🔗 MACIERZ KORELACJI")
-        
-        # Łączenie danych do korelacji
-        combined_df = df_macro.copy()
-        combined_df[selected_asset] = df['Close']
-        corr = combined_df.corr().iloc[::-1] # Odwrócenie dla lepszego wyglądu
-        
-        fig_corr = px.imshow(corr, 
-                             text_auto=".2f", 
-                             color_continuous_scale='RdBu_r', 
-                             aspect="auto",
-                             title="Correlation Heatmap (1Y)")
-        fig_corr.update_layout(template='plotly_dark', height=300)
-        st.plotly_chart(fig_corr, use_container_width=True)
-        
-        st.subheader("🎯 Z-SCORE DISTRIBUTION")
-        # Gaussian Distribution z Twojego kodu
-        mu = df['Returns'].mean()
-        sigma = df['Returns'].std()
-        x_axis = np.linspace(mu - 4*sigma, mu + 4*sigma, 100)
-        y_axis = norm.pdf(x_axis, mu, sigma)
-        
-        fig_gauss = go.Figure()
-        fig_gauss.add_trace(go.Scatter(x=x_axis, y=y_axis, mode='lines', fill='tozeroy', line=dict(color='#00ff88')))
-        fig_gauss.add_vline(x=df['Returns'].iloc[-1], line_width=2, line_color="red", annotation_text="TODAY")
-        fig_gauss.update_layout(template='plotly_dark', height=250, showlegend=False, margin=dict(l=0,r=0,t=30,b=0))
-        st.plotly_chart(fig_gauss, use_container_width=True)
-
-    # C. ANALIZA SEZONOWOŚCI (INTRA-DAY ALPHA)
-    st.markdown("---")
-    st.subheader("🕒 ALPHA HOURS: GDY CZAS DAJE PRZEWAGĘ")
-    
-    df_h['Hour'] = df_h.index.hour
-    df_h['DayOfWeek'] = df_h.index.day_name()
-    df_h['Returns_Pips'] = df_h['Close'].pct_change() * 10000 
-    
-    # Sortowanie dni
-    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-    heatmap_data = df_h.groupby(['DayOfWeek', 'Hour'])['Returns_Pips'].mean().unstack().reindex(days)
-    
-    fig_heat = px.imshow(
-        heatmap_data,
-        labels=dict(x="Hour (UTC)", y="Day", color="Mean Pips"),
-        color_continuous_scale="RdYlGn",
-        origin='upper'
+    fig.update_layout(
+        template='plotly_dark',
+        height=400,
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_rangeslider_visible=False,
+        paper_bgcolor='#1a1a1a',
+        plot_bgcolor='#000000',
+        font=dict(family="Consolas", size=10)
     )
-    fig_heat.update_layout(template='plotly_dark', height=350)
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-except Exception as e:
-    st.error(f"SYSTEM ERROR: {e}")
-    st.info("Spróbuj wybrać inny ticker lub odśwież aplikację.")
+# === PRAWA KOLUMNA: PORTFOLIO & MONITOR ===
+with col_right:
+    # C. PORTFOLIO PANEL
+    st.markdown("### 💼 PORTFOLIO & ACCOUNT")
+    
+    # Account Summary (Top Bar)
+    ac1, ac2, ac3 = st.columns(3)
+    ac1.metric("Net Liquidity", f"${st.session_state.cash + st.session_state.portfolio['Value'].sum():,.2f}")
+    ac2.metric("Cash Balance", f"${st.session_state.cash:,.2f}")
+    
+    # Aktualizacja P&L na żywo
+    total_unrealized = 0
+    if not st.session_state.portfolio.empty:
+        for index, row in st.session_state.portfolio.iterrows():
+            # Symulacja live price (dla uproszczenia bierzemy ostatnią cenę z wykresu)
+            # W pełnej wersji tutaj byłoby zapytanie o cenę dla każdego tickera
+            mkt_price = current_price if row['Symbol'] == ticker else row['Avg Price'] 
+            val = row['Qty'] * mkt_price
+            pnl = val - (row['Qty'] * row['Avg Price'])
+            
+            st.session_state.portfolio.at[index, 'Value'] = val
+            st.session_state.portfolio.at[index, 'Unrealized P&L'] = pnl
+            total_unrealized += pnl
+
+    ac3.metric("Unrealized P&L", f"${total_unrealized:,.2f}", delta_color="normal")
+
+    st.markdown("---")
+    
+    # Wyświetlanie Tabeli Portfela
+    if not st.session_state.portfolio.empty:
+        # Formatowanie tabeli
+        st.dataframe(
+            st.session_state.portfolio.style.format({
+                "Qty": "{:,.0f}",
+                "Avg Price": "{:.4f}",
+                "Value": "{:,.2f}",
+                "Unrealized P&L": "{:,.2f}"
+            }).applymap(lambda x: 'color: #00ff00' if x > 0 else 'color: #ff3333', subset=['Unrealized P&L']),
+            use_container_width=True,
+            height=300
+        )
+    else:
+        st.info("No active positions. Use Order Entry to trade.")
+
+    # D. MARKET SCANNER / NEWS (Statyczna lista dla stylu)
+    st.markdown("### 📰 NEWS & EVENTS")
+    news_data = pd.DataFrame({
+        "Time": ["12:05", "11:45", "10:30", "09:15", "08:00"],
+        "Source": ["DJ", "RTRS", "BBG", "DJ", "RTRS"],
+        "Headline": [
+            "ECB Signals Rate Pause in December",
+            "EURUSD breaks key resistance at 1.1650",
+            "US Initial Jobless Claims lower than expected",
+            "Tech Sector leads rally in pre-market",
+            "Oil prices stabilize after inventory data"
+        ]
+    })
+    st.dataframe(news_data, hide_index=True, use_container_width=True)
+
+# Pasek stanu na dole
+st.markdown("---")
+st.caption(f"CONNECTED: {ticker} | DATA: DELAYED 15min (YFINANCE) | MODE: PAPER TRADING")
