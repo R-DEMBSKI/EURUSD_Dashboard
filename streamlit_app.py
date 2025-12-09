@@ -4,216 +4,253 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
-# --- 1. KONFIGURACJA STRONY (Full Width, Dark) ---
-st.set_page_config(layout="wide", page_title="EURUSD Trader Terminal", page_icon="📉")
+# --- 1. KONFIGURACJA STRONY (Ultra Wide) ---
+st.set_page_config(layout="wide", page_title="EURUSD Pro Terminal", page_icon="🦅", initial_sidebar_state="expanded")
 
-# --- 2. ADVANCED CSS (Terminal Look) ---
-# To zmienia domyślny wygląd Streamlit na styl "Platforma Tradingowa"
+# --- 2. ZAAWANSOWANY CSS (Inspiracja UIverse + TradingView) ---
 st.markdown("""
 <style>
-    /* Ogólny reset */
-    .stApp { background-color: #0b0e11; }
-    
-    /* Zmniejszenie marginesów strony (żeby wykorzystać cały ekran) */
-    .block-container { padding-top: 1rem; padding-bottom: 0rem; padding-left: 1rem; padding-right: 1rem; }
-    
-    /* Stylizacja metryk (Kafelki na górze) */
-    div[data-testid="stMetric"] {
-        background-color: #1e222d;
-        border: 1px solid #333;
-        padding: 10px;
-        border-radius: 5px;
-        color: white;
+    /* Reset marginesów - wykorzystujemy każdy piksel */
+    .block-container {
+        padding-top: 0rem;
+        padding-bottom: 0rem;
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+        max-width: 100%;
     }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem; color: #8b949e; }
-    [data-testid="stMetricValue"] { font-size: 1.2rem; font-family: 'Roboto Mono', monospace; }
     
-    /* Ukrycie domyślnego menu hamburgera i stopki */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    /* Tło aplikacji */
+    .stApp { background-color: #0e1117; }
     
-    /* Cieńsze odstępy między kolumnami */
-    div[data-testid="column"] { gap: 0.5rem; }
+    /* CUSTOM CARDS (Zamiast st.metric) */
+    .kpi-card {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 10px;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        margin-bottom: 10px;
+    }
+    .kpi-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+    .kpi-value { font-size: 1.4rem; font-family: 'Roboto Mono', monospace; font-weight: bold; color: #e6edf3; }
+    .kpi-delta-up { color: #2ea043; font-size: 0.9rem; }
+    .kpi-delta-down { color: #f85149; font-size: 0.9rem; }
+    
+    /* Ukrycie paska header Streamlit (dla czystego wyglądu) */
+    header {visibility: hidden;}
+    
+    /* Stylizacja Sidebara */
+    [data-testid="stSidebar"] {
+        background-color: #0d1117;
+        border-right: 1px solid #30363d;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 3. PANEL BOCZNY ---
 with st.sidebar:
-    st.header("⚙️ Settings")
-    interval = st.select_slider("Timeframe", options=["1m", "5m", "15m", "30m", "1h", "4h"], value="5m")
-    st.info("💡 Aplikacja pobiera dane z opóźnieniem (yfinance). Do scalpingu na żywo zalecane API IBKR/Alpaca.")
+    st.markdown("### 🦅 Sniper Settings")
+    
+    interval = st.selectbox("Timeframe", ["1m", "5m", "15m", "1h", "4h", "1d"], index=1)
+    
     st.divider()
-    st.write("Wskaźniki:")
-    show_pivots = st.checkbox("Pivot Points", value=True)
-    show_vwap = st.checkbox("VWAP Estimate", value=True)
-
-# --- 4. DATA ENGINE (Naprawa 'nan') ---
-@st.cache_data(ttl=60)
-def get_pro_data(interval):
-    # Mapowanie interwału na okres wsteczny
-    period_map = {"1m": "2d", "5m": "5d", "15m": "1mo", "30m": "1mo", "1h": "3mo", "4h": "1y"}
-    period = period_map[interval]
     
-    # Pobieramy osobno, żeby łatwiej kontrolować błędy
-    # EURUSD
-    eur = yf.download("EURUSD=X", period=period, interval=interval, progress=False)
+    st.markdown("Expected Trading Range")
+    st.info("Obliczamy zakres na podstawie ATR (zmienności).")
     
-    # DXY (Indeks Dolara) - często ma luki na interwałach < 1h
-    dxy = yf.download("DX-Y.NYB", period=period, interval=interval, progress=False)
+    show_ema = st.toggle("EMA Cloud (20/50)", value=True)
+    show_pivots = st.toggle("Pivot Points", value=True)
     
-    # US 10Y Yields
-    tnx = yf.download("^TNX", period=period, interval=interval, progress=False)
+    if st.button("🔄 Force Refresh", use_container_width=True):
+        st.cache_data.clear()
 
-    return eur, dxy, tnx
-
-# Pobieranie
-try:
-    df_eur, df_dxy, df_tnx = get_pro_data(interval)
+# --- 4. ENGINE DANYCH ---
+@st.cache_data(ttl=30)
+def get_market_data(interval):
+    # Okresy dopasowane do scalpingu
+    p_map = {"1m": "2d", "5m": "5d", "15m": "1mo", "1h": "3mo", "4h": "1y", "1d": "2y"}
     
-    # --- DATA CLEANING (Kluczowe dla 'nan') ---
-    # Jeśli yfinance zwraca MultiIndex, spłaszczamy go
-    if isinstance(df_eur.columns, pd.MultiIndex): df_eur.columns = df_eur.columns.get_level_values(0)
-    if isinstance(df_dxy.columns, pd.MultiIndex): df_dxy.columns = df_dxy.columns.get_level_values(0)
-    if isinstance(df_tnx.columns, pd.MultiIndex): df_tnx.columns = df_tnx.columns.get_level_values(0)
+    try:
+        # Pobieramy dane
+        tickers = "EURUSD=X DX-Y.NYB ^TNX"
+        data = yf.download(tickers, period=p_map[interval], interval=interval, group_by='ticker', progress=False)
+        
+        # Obsługa MultiIndex i czyszczenie
+        eur = data['EURUSD=X'].copy()
+        dxy = data['DX-Y.NYB'].copy()
+        tnx = data['^TNX'].copy()
+        
+        # FILL NAN: Kluczowe dla DXY i Yields (One mają luki, Forex nie)
+        # Metoda: Resample do interwału + Forward Fill
+        dxy = dxy.resample(interval.replace('m', 'min')).ffill().reindex(eur.index, method='ffill')
+        tnx = tnx.resample(interval.replace('m', 'min')).ffill().reindex(eur.index, method='ffill')
+        
+        return eur, dxy, tnx
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # Wypełnianie braków (Forward Fill) - naprawia wykresy DXY
-    df_dxy = df_dxy.resample(interval.replace('m', 'min')).ffill().reindex(df_eur.index, method='ffill')
-    df_tnx = df_tnx.resample(interval.replace('m', 'min')).ffill().reindex(df_eur.index, method='ffill')
+df_eur, df_dxy, df_tnx = get_market_data(interval)
 
-    # Ostatnie wartości
-    last_price = df_eur['Close'].iloc[-1]
-    prev_close = df_eur['Close'].iloc[-2]
-    dxy_val = df_dxy['Close'].iloc[-1]
-    tnx_val = df_tnx['Close'].iloc[-1]
+# --- 5. INTERFEJS: TOP BAR (HTML/CSS Metrics) ---
+if not df_eur.empty:
+    last = df_eur['Close'].iloc[-1]
+    prev = df_eur['Close'].iloc[-2]
+    change = last - prev
+    pct = (change / prev) * 100
+    color_cls = "kpi-delta-up" if change >= 0 else "kpi-delta-down"
+    sign = "+" if change >= 0 else ""
     
-    # Korelacja (ostatnie 50 świec)
-    corr_dxy = df_eur['Close'].tail(50).corr(df_dxy['Close'].tail(50))
-
-except Exception as e:
-    st.error(f"Błąd danych: {e}")
-    st.stop()
-
-# --- 5. OBLICZENIA TECHNICZNE ---
-# Pivot Points (Standard)
-high_d = df_eur['High'].iloc[-200:].max() # Uproszczone High z sesji
-low_d = df_eur['Low'].iloc[-200:].min()
-close_d = df_eur['Close'].iloc[-1]
-pp = (high_d + low_d + close_d) / 3
-r1 = (2 * pp) - low_d
-s1 = (2 * pp) - high_d
-
-# --- 6. INTERFEJS (GRID LAYOUT) ---
-
-# GÓRNY PASEK (METRYKI)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("EUR/USD", f"{last_price:.5f}", f"{(last_price-prev_close)*10000:.1f} pips", delta_color="normal")
-c2.metric("DXY Index", f"{dxy_val:.2f}", delta_color="inverse") # Czerwony jak rośnie (bo źle dla EUR)
-c3.metric("Korelacja DXY", f"{corr_dxy:.2f}")
-c4.metric("US 10Y Yield", f"{tnx_val:.3f}%")
-
-# GŁÓWNA SEKCJA (WYKRES + SIDEBAR)
-col_chart, col_data = st.columns([3, 1]) # Podział ekranu 75% / 25%
-
-with col_chart:
-    # --- WYKRES PROFESJONALNY ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.8, 0.2], vertical_spacing=0.03)
-
-    # Świece
-    fig.add_trace(go.Candlestick(x=df_eur.index,
-                                 open=df_eur['Open'], high=df_eur['High'],
-                                 low=df_eur['Low'], close=df_eur['Close'],
-                                 name="Price"), row=1, col=1)
+    dxy_last = df_dxy['Close'].iloc[-1]
+    tnx_last = df_tnx['Close'].iloc[-1]
     
-    # Pivot Points
+    # KORELACJA (30 świec)
+    corr = df_eur['Close'].tail(30).corr(df_dxy['Close'].tail(30))
+    corr_color = "#f85149" if corr > -0.5 else "#2ea043" # Czerwony jeśli korelacja słabnie (dla EURUSD powinna być silnie ujemna)
+
+    # Używamy HTML columns zamiast st.metric dla lepszego layoutu
+    cols = st.columns(4)
+    
+    # KPI 1: EURUSD
+    cols[0].markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-label">EUR / USD</div>
+        <div class="kpi-value">{last:.5f}</div>
+        <div class="{color_cls}">{sign}{change*10000:.1f} pips ({pct:.2f}%)</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # KPI 2: DXY
+    cols[1].markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-label">DOLLAR INDEX (DXY)</div>
+        <div class="kpi-value">{dxy_last:.2f}</div>
+        <div style="font-size: 0.8rem; color: #8b949e;">Inverse Driver</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # KPI 3: CORRELATION
+    cols[2].markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-label">DXY CORRELATION</div>
+        <div class="kpi-value" style="color: {corr_color}">{corr:.2f}</div>
+        <div style="font-size: 0.8rem; color: #8b949e;">Target: < -0.80</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # KPI 4: SESSION
+    now_hour = datetime.now(pytz.utc).hour
+    session_name = "Asian / Off"
+    session_color = "#8b949e"
+    if 7 <= now_hour < 16: session_name, session_color = "LONDON", "#2ea043"
+    if 12 <= now_hour < 21: session_name, session_color = "NEW YORK", "#d29922"
+    if 12 <= now_hour < 16: session_name, session_color = "⚡ OVERLAP", "#f85149"
+    
+    cols[3].markdown(f"""
+    <div class="kpi-card">
+        <div class="kpi-label">ACTIVE SESSION</div>
+        <div class="kpi-value" style="color: {session_color}">{session_name}</div>
+        <div style="font-size: 0.8rem; color: #8b949e;">UTC: {now_hour}:00</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # --- 6. WYKRES GŁÓWNY (TradingView Style) ---
+    
+    # Tworzenie subplotów: Główny (0.8) + Wolumen/Oscylator (0.2)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.8, 0.2])
+
+    # A. ŚWIECE
+    fig.add_trace(go.Candlestick(
+        x=df_eur.index,
+        open=df_eur['Open'], high=df_eur['High'], low=df_eur['Low'], close=df_eur['Close'],
+        name="Price",
+        increasing_line_color='#2ea043', increasing_fillcolor='#2ea043', # GitHub Green
+        decreasing_line_color='#f85149', decreasing_fillcolor='#f85149'  # GitHub Red
+    ), row=1, col=1)
+
+    # B. WSKAŹNIKI (EMA CLOUD)
+    if show_ema:
+        ema20 = df_eur['Close'].ewm(span=20).mean()
+        ema50 = df_eur['Close'].ewm(span=50).mean()
+        fig.add_trace(go.Scatter(x=df_eur.index, y=ema20, line=dict(color='#2196F3', width=1), name="EMA 20"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_eur.index, y=ema50, line=dict(color='#FF9800', width=1), name="EMA 50"), row=1, col=1)
+
+    # C. PIVOT POINTS
     if show_pivots:
-        fig.add_hline(y=pp, line_dash="dash", line_color="yellow", annotation_text="Pivot", row=1, col=1)
-        fig.add_hline(y=r1, line_dash="dot", line_color="red", annotation_text="R1", row=1, col=1)
-        fig.add_hline(y=s1, line_dash="dot", line_color="green", annotation_text="S1", row=1, col=1)
+        # Prosta kalkulacja dzienna
+        high_d = df_eur['High'].max()
+        low_d = df_eur['Low'].min()
+        close_d = df_eur['Close'].iloc[-1]
+        pp = (high_d + low_d + close_d) / 3
+        fig.add_hline(y=pp, line_dash="dash", line_color="white", opacity=0.3, row=1, col=1, annotation_text="PV")
 
-    # VWAP (Uproszczony - Rolling Mean)
-    if show_vwap:
-        df_eur['VWAP_Est'] = df_eur['Close'].rolling(20).mean()
-        fig.add_trace(go.Scatter(x=df_eur.index, y=df_eur['VWAP_Est'], 
-                                 line=dict(color='#2980b9', width=2), name="Trend (SMA20)"), row=1, col=1)
-
-    # RSI (Dół)
+    # D. DOLNY PANEL (RSI lub Wolumen)
+    # Ponieważ Forex nie ma realnego wolumenu w yfinance, używamy RSI jako proxy momentum
     delta = df_eur['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     
-    fig.add_trace(go.Scatter(x=df_eur.index, y=rsi, line=dict(color='#9b59b6', width=2), name="RSI 14"), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="gray", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="gray", row=2, col=1)
+    fig.add_trace(go.Scatter(x=df_eur.index, y=rsi, line=dict(color='#A020F0', width=2), name="RSI"), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#333", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="#333", row=2, col=1)
 
-    # STYLIZACJA WYKRESU (Brak przerw, ciemny motyw)
+    # E. LAYOUT CONFIG (Kluczowe dla UX)
     fig.update_layout(
-        height=650,
-        margin=dict(l=10, r=10, t=10, b=10),
-        template="plotly_dark",
-        paper_bgcolor="#1e222d", # Tło kontenera
-        plot_bgcolor="#121417",  # Tło wykresu
-        xaxis_rangeslider_visible=False,
-        showlegend=False
+        height=650, # Wysoki wykres
+        margin=dict(l=0, r=50, t=10, b=0), # Margines po prawej na etykiety cen
+        paper_bgcolor="#0e1117", # Tło zgodne z aplikacją
+        plot_bgcolor="#0e1117",
+        showlegend=False,
+        dragmode='pan', # Domyślnie "rączka" do przesuwania
+        xaxis=dict(
+            rangeslider=dict(visible=False), # Ukrywamy suwak na dole
+            type="date",
+            showgrid=True, gridcolor="#1f242d"
+        ),
+        yaxis=dict(
+            side="right", # Cena po prawej stronie (jak w TradingView)
+            showgrid=True, gridcolor="#1f242d",
+            tickformat=".5f"
+        ),
+        yaxis2=dict(
+            side="right",
+            showgrid=False,
+            range=[0, 100] # RSI Range
+        )
     )
     
-    # Usunięcie weekendów (Rangebreaks)
-    fig.update_xaxes(
-        rangebreaks=[dict(bounds=["sat", "mon"])], # Ukrywa weekendy
-        gridcolor="#333"
-    )
-    fig.update_yaxes(gridcolor="#333")
+    # Ukrywanie weekendów
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
 
-    st.plotly_chart(fig, use_container_width=True)
+    # WYŚWIETLANIE Z KONFIGURACJĄ ZOOM
+    st.plotly_chart(fig, use_container_width=True, config={
+        'scrollZoom': True,       # Przybliżanie kółkiem myszy
+        'displayModeBar': True,   # Pasek narzędzi
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+        'displaylogo': False
+    })
 
-with col_data:
-    # --- PANEL BOCZNY (MARKET CONTEXT) ---
-    st.markdown("### 📊 Market Depth")
+    # --- 7. MARKET DEPTH & NEWS (Split Layout) ---
+    c_left, c_right = st.columns([2, 1])
     
-    # Symulacja "Order Book" (bo yfinance tego nie daje)
-    # Wyliczamy siłę kupujących/sprzedających na podstawie ostatnich świec
-    bull_power = df_eur[df_eur['Close'] > df_eur['Open']]['Volume'].tail(10).sum()
-    bear_power = df_eur[df_eur['Close'] < df_eur['Open']]['Volume'].tail(10).sum()
-    total_vol = bull_power + bear_power
-    
-    if total_vol > 0:
-        bull_pct = (bull_power / total_vol) * 100
-        bear_pct = (bear_power / total_vol) * 100
-    else:
-        bull_pct = 50
-        bear_pct = 50
-
-    st.write("Volume Imbalance (Last 10 candles)")
-    st.progress(int(bull_pct))
-    c_side1, c_side2 = st.columns(2)
-    c_side1.caption(f"Buyers: {bull_pct:.0f}%")
-    c_side2.caption(f"Sellers: {bear_pct:.0f}%")
-    
-    st.divider()
-    
-    # Analiza Sesji
-    st.markdown("### 🕒 Session")
-    now_utc = datetime.now(pytz.utc)
-    hour = now_utc.hour
-    
-    if 7 <= hour < 16:
-        st.success("🇬🇧 London Open")
-    else:
-        st.markdown("🇬🇧 London Closed")
+    with c_left:
+        st.markdown("##### 📝 Notatki / Poziomy")
+        st.text_area("Trading Plan", height=100, placeholder="Np. Czekam na retest poziomu 1.0550, Stop Loss poniżej wicka...")
         
-    if 12 <= hour < 21:
-        st.success("🇺🇸 New York Open")
-    else:
-        st.markdown("🇺🇸 New York Closed")
+    with c_right:
+        st.markdown("##### 📊 Imbalance (Trend)")
+        # Prosta wizualizacja trendu na ostatnich 10 świecach
+        last_10 = df_eur.tail(10)
+        bullish = len(last_10[last_10['Close'] > last_10['Open']])
+        bearish = len(last_10) - bullish
         
-    st.divider()
-    st.markdown("### 📝 Levels")
-    st.code(f"""
-    R1: {r1:.5f}
-    PV: {pp:.5f}
-    S1: {s1:.5f}
-    """, language="text")
+        st.write(f"Ostatnie 10 świec: {bullish} Up / {bearish} Down")
+        st.progress(bullish / 10) # Pasek postępu (Bullishness)
+
+else:
+    st.warning("Pobieranie danych... Jeśli trwa to długo, odśwież stronę.")
