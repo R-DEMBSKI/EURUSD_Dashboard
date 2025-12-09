@@ -1,252 +1,307 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from sklearn.mixture import GaussianMixture
+from plotly.subplots import make_subplots
 from scipy.stats import norm
+from sklearn.mixture import GaussianMixture
+from datetime import datetime
+import pytz
 
-# --- 1. KONFIGURACJA UI (FIXED PADDING) ---
-st.set_page_config(layout="wide", page_title="QUANT LAB EXPERT", page_icon="🧪", initial_sidebar_state="expanded")
+# --- 1. KONFIGURACJA UI (POLSKI TERMINAL) ---
+st.set_page_config(layout="wide", page_title="EURUSD COMMAND CENTER", page_icon="🦅", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
-    /* GLOBALNY STYL - DEEP BLACK */
-    .stApp { background-color: #050505; color: #e0e0e0; font-family: 'Roboto Mono', monospace; }
+    /* STYL GLOBALNY - GŁĘBOKA CZERŃ */
+    .stApp { background-color: #000000; color: #e0e0e0; font-family: 'Roboto', sans-serif; }
     
-    /* NAPRAWA PRZESUNIĘCIA (PADDING) */
-    .block-container { 
-        padding-top: 3rem !important; /* To naprawia uciętą górę */
-        padding-bottom: 2rem;
-        max-width: 100%; 
-    }
+    /* MODUŁY I KONTENERY */
+    .block-container { padding-top: 1rem; padding-bottom: 5rem; max-width: 100%; }
+    header, footer {visibility: hidden;}
     
-    /* UKRYCIE ELEMENTÓW SYSTEMOWYCH */
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* KONTEINERY */
-    .quant-card { 
-        background-color: #0f0f0f; 
-        border: 1px solid #333; 
-        padding: 15px; 
-        border-radius: 2px; 
-        margin-bottom: 15px;
-    }
-    .header-text { 
-        color: #00e5ff; 
-        font-weight: bold; 
-        font-size: 0.85rem; 
-        text-transform: uppercase; 
-        letter-spacing: 1.5px; 
-        margin-bottom: 15px; 
-        border-bottom: 1px solid #333; 
-        padding-bottom: 5px; 
-    }
-    
-    /* KPI METRICS */
-    div[data-testid="stMetric"] { 
-        background-color: #111; 
+    /* KPI METRICS (LIVE DATA) */
+    div[data-testid="stMetric"] {
+        background-color: #0b0b0b; 
         border: 1px solid #333; 
         padding: 10px; 
-        border-radius: 0px;
+        border-radius: 4px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
     }
-    div[data-testid="stMetricLabel"] { font-size: 0.7rem !important; color: #888; text-transform: uppercase; }
-    div[data-testid="stMetricValue"] { font-size: 1.3rem !important; color: #fff; font-weight: 700; font-family: 'Consolas', monospace; }
+    div[data-testid="stMetricLabel"] { font-size: 0.7rem !important; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+    div[data-testid="stMetricValue"] { font-size: 1.4rem !important; color: #fff; font-weight: 700; font-family: 'Consolas', monospace; }
     
-    /* ZAKŁADKI */
-    .stTabs [data-baseweb="tab-list"] { gap: 2px; background-color: #050505; }
-    .stTabs [data-baseweb="tab"] {
-        height: 35px; background-color: #1a1a1a; color: #aaa; border: 1px solid #333; border-radius: 0px; font-size: 0.8rem;
+    /* OPISY KONCEPCYJNE */
+    .concept-box {
+        background-color: #1a1a1a;
+        border-left: 3px solid #00bcd4;
+        padding: 15px;
+        margin-top: 10px;
+        margin-bottom: 20px;
+        font-size: 0.85rem;
+        color: #ccc;
     }
-    .stTabs [aria-selected="true"] { background-color: #00e5ff; color: #000; font-weight: bold; }
+    .concept-title { color: #00bcd4; font-weight: bold; font-size: 0.9rem; margin-bottom: 5px; }
+
+    /* ZAKŁADKI */
+    .stTabs [data-baseweb="tab-list"] { gap: 5px; background-color: #000; padding: 10px 0; }
+    .stTabs [data-baseweb="tab"] {
+        height: 40px; background-color: #111; color: #aaa; border: 1px solid #333; border-radius: 4px;
+    }
+    .stTabs [aria-selected="true"] { background-color: #00bcd4; color: #000; font-weight: bold; border-color: #00bcd4; }
+    
+    /* LIQUIDITY BAR */
+    .liq-bar { height: 8px; width: 100%; background: linear-gradient(90deg, #333 0%, #00bcd4 50%, #333 100%); border-radius: 4px; margin-top: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. QUANT ENGINE (CORE) ---
+# --- 2. SILNIK DANYCH (LIVE & HISTORY) ---
 
-def load_myfxbook_data(uploaded_file):
+# Strefy Czasowe
+TZ_BERLIN = pytz.timezone('Europe/Berlin')
+TZ_LONDON = pytz.timezone('Europe/London')
+TZ_NY = pytz.timezone('America/New_York')
+TZ_TOKYO = pytz.timezone('Asia/Tokyo')
+
+@st.cache_data(ttl=30)
+def get_live_data(ticker="EURUSD=X"):
+    """Pobiera świeże dane LIVE do paska KPI."""
     try:
-        df = pd.read_csv(uploaded_file, skiprows=1) # Myfxbook ma nagłówek w 2 linii
+        # Pobieramy ostatni dzień (1m) dla precyzji
+        df = yf.download(ticker, period="1d", interval="1m", progress=False)
+        if df.empty: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+        return df.iloc[-1] # Zwraca ostatnią świecę
+    except: return None
+
+@st.cache_data(ttl=600)
+def get_analysis_data(ticker, period="1mo", interval="1h"):
+    """Pobiera dane do wykresów analitycznych (jeśli nie ma pliku)."""
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
+        return df
+    except: return None
+
+def load_uploaded_csv(uploaded_file):
+    """Parsuje plik użytkownika (Format Myfxbook/MT4)."""
+    try:
+        df = pd.read_csv(uploaded_file, skiprows=1) # Pomijamy nagłówek Myfxbook
         df.columns = [c.strip() for c in df.columns]
         df['Date'] = pd.to_datetime(df['Date'])
         df = df.sort_values('Date').set_index('Date')
-        required = ['Open', 'High', 'Low', 'Close']
-        if not all(c in df.columns for c in required): return None
-        return df[required]
-    except: return None
+        return df
+    except Exception as e:
+        return None
 
-def generate_mock_data():
-    dates = pd.date_range(end=pd.Timestamp.now(), periods=1000, freq='B') # Business days
-    np.random.seed(42)
-    returns = np.random.normal(0.0001, 0.006, 1000)
-    # Dodanie sezonowości i szoków
-    returns[::5] += 0.002 # Wtorki rosną (mock)
-    returns[::20] *= 3 # Szok co miesiąc
-    price = 1.1000 * np.exp(np.cumsum(returns))
-    df = pd.DataFrame({'Close': price}, index=dates)
-    df['Open'] = df['Close'] * (1 + np.random.normal(0, 0.001, 1000))
-    df['High'] = df[['Open', 'Close']].max(axis=1) * 1.002
-    df['Low'] = df[['Open', 'Close']].min(axis=1) * 0.998
-    return df
+# --- 3. ALGORYTMY QUANTOWE ---
 
-def analyze_regimes(df):
+def calculate_probability_well(df):
+    """Oblicza krzywą Gaussa dla Live Struktury."""
+    v = df['Volume'].values
+    tp = (df['High'] + df['Low'] + df['Close']) / 3
+    # VWAP jako "Fair Value"
+    df['VWAP'] = (tp * v).cumsum() / v.cumsum()
+    vwap = df['VWAP'].iloc[-1]
+    std = df['Close'].std()
+    last_price = df['Close'].iloc[-1]
+    z_score = (last_price - vwap) / std
+    return vwap, std, last_price, z_score
+
+def analyze_regimes_ml(df):
+    """Analiza reżimów (GMM Clustering) dla danych historycznych."""
     data = df.copy()
     data['Log_Ret'] = np.log(data['Close'] / data['Close'].shift(1))
     data['Range'] = (data['High'] - data['Low']) / data['Close']
     data = data.dropna()
     
-    # GMM Clustering
+    # Model GMM
     X = data[['Log_Ret', 'Range']].values
-    gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
-    gmm.fit(X)
-    data['Regime'] = gmm.predict(X)
+    model = GaussianMixture(n_components=3, random_state=42).fit(X)
+    data['Regime'] = model.predict(X)
     
-    # Sortowanie reżimów po zmienności (0=Low, 2=High)
+    # Sortowanie: 0=Niska Zmienność, 2=Wysoka
     vol_means = data.groupby('Regime')['Range'].mean().sort_values()
     mapping = {old: new for new, old in enumerate(vol_means.index)}
     data['Regime'] = data['Regime'].map(mapping)
-    
     return data
 
-def calculate_volatility_cone(df):
-    """Oblicza historyczne percentyle zmienności dla różnych okien."""
-    windows = [5, 10, 20, 40, 60, 90]
-    log_ret = np.log(df['Close'] / df['Close'].shift(1))
+def get_liquidity_status():
+    """Zwraca poziom płynności i aktywne sesje."""
+    now = datetime.now(TZ_BERLIN)
+    h = now.hour
     
-    cone_data = []
-    current_vols = []
+    sessions = []
+    liquidity = 0
     
-    for w in windows:
-        # Rolling annualized vol
-        roll_vol = log_ret.rolling(w).std() * np.sqrt(252)
+    if 9 <= h < 18: 
+        sessions.append("LONDYN")
+        liquidity += 40
+    if 14 <= h < 22: 
+        sessions.append("NOWY JORK")
+        liquidity += 50
+    if h >= 23 or h < 8: 
+        sessions.append("TOKIO/SYDNEY")
+        liquidity += 10
         
-        # Percentyle z całej historii
-        min_v = roll_vol.min()
-        q25 = roll_vol.quantile(0.25)
-        median = roll_vol.median()
-        q75 = roll_vol.quantile(0.75)
-        max_v = roll_vol.max()
-        
-        # Aktualna zmienność dla tego okna
-        curr_v = roll_vol.iloc[-1]
-        
-        cone_data.append({'Window': w, 'Min': min_v, 'Q25': q25, 'Median': median, 'Q75': q75, 'Max': max_v})
-        current_vols.append({'Window': w, 'Current': curr_v})
-        
-    return pd.DataFrame(cone_data), pd.DataFrame(current_vols)
+    liq_level = min(liquidity, 100)
+    status = " | ".join(sessions) if sessions else "OFF-HOURS"
+    return status, liq_level
 
-# --- 3. DASHBOARD LOGIC ---
+# --- 4. LAYOUT APLIKACJI ---
 
+# PANEL BOCZNY (USTAWIENIA)
 with st.sidebar:
-    st.markdown("### 📥 DATA INPUT")
-    uploaded_file = st.file_uploader("Wgraj CSV (Myfxbook)", type=['csv'])
-    if uploaded_file:
-        df_raw = load_myfxbook_data(uploaded_file)
-        source = "USER FILE"
-    else:
-        df_raw = generate_mock_data()
-        source = "MOCK DATA"
-
-if df_raw is not None:
-    df = analyze_regimes(df_raw)
-    
-    # --- HEADER KPI ---
-    last_row = df.iloc[-1]
-    
-    # VaR (Value at Risk) - 95% Confidence
-    var_95 = np.percentile(df['Log_Ret'], 5) * 100 # dzienne ryzyko w %
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("ANALYZED BARS", f"{len(df)}", source)
-    c2.metric("CURRENT REGIME", f"TYPE {int(last_row['Regime'])}", 
-              "HIGH VOL" if last_row['Regime']==2 else "TREND" if last_row['Regime']==0 else "NOISE", 
-              delta_color="off")
-    c3.metric("DAILY VaR (95%)", f"{var_95:.2f}%", "DOWNSIDE RISK", delta_color="inverse")
-    c4.metric("LAST RETURN", f"{last_row['Log_Ret']*100:.2f}%", f"Range: {last_row['Range']*10000:.0f} pips")
-    
+    st.markdown("### ⚙️ STEROWANIE")
+    ticker = st.text_input("SYMBOL LIVE", "EURUSD=X")
     st.markdown("---")
+    st.markdown("### 📂 LABORATORIUM DANYCH")
+    st.info("Wgraj tutaj plik CSV z historią, aby aktywować analizę statystyczną w zakładce 'Laboratorium'.")
+    uploaded_file = st.file_uploader("Wgraj plik (CSV)", type=['csv'])
 
-    # --- TABS FOR DEEP DIVE ---
-    tab_regime, tab_season, tab_vol = st.tabs(["🧬 MARKET GENETICS (REGIMES)", "📅 SEASONALITY LAB", "⚠️ VOLATILITY CONE"])
+# POBIERANIE DANYCH LIVE (ZAWSZE AKTYWNE)
+live_candle = get_live_data(ticker)
+liq_status, liq_val = get_liquidity_status()
+now_berlin = datetime.now(TZ_BERLIN)
 
-    # === TAB 1: REGIMES (GMM) ===
-    with tab_regime:
-        c_viz, c_trans = st.columns([2, 1])
-        with c_viz:
-            st.markdown(f"<div class='header-text'>AI CLUSTERING: RETURNS vs RANGE</div>", unsafe_allow_html=True)
-            fig_clust = px.scatter(
-                df, x='Log_Ret', y='Range', color='Regime',
-                color_continuous_scale=['#00ff00', '#ffff00', '#ff0000'],
-                opacity=0.7, title=""
-            )
-            # Zaznacz ostatni punkt
-            fig_clust.add_trace(go.Scatter(
-                x=[last_row['Log_Ret']], y=[last_row['Range']],
-                mode='markers', marker=dict(color='white', size=15, line=dict(color='black', width=2)),
-                name='CURRENT'
-            ))
-            fig_clust.update_layout(template='plotly_dark', height=450, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor='#0f0f0f')
-            st.plotly_chart(fig_clust, use_container_width=True)
-            
-        with c_trans:
-            st.markdown(f"<div class='header-text'>TRANSITION PROBABILITIES</div>", unsafe_allow_html=True)
-            df['Next_Regime'] = df['Regime'].shift(-1)
-            trans_matrix = pd.crosstab(df['Regime'], df['Next_Regime'], normalize='index')
-            
-            fig_trans = go.Figure(data=go.Heatmap(
-                z=trans_matrix.values, x=[0,1,2], y=[0,1,2],
-                colorscale='Viridis', text=np.round(trans_matrix.values*100, 0), texttemplate="%{text}%"
-            ))
-            fig_trans.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0), title="Next Day Prob", paper_bgcolor='#0f0f0f')
-            st.plotly_chart(fig_trans, use_container_width=True)
+# --- SEKCJ 1: GÓRNY PASEK KPI (LIVE) ---
+if live_candle is not None:
+    c1, c2, c3, c4 = st.columns(4)
+    
+    # 1. Cena Live
+    price = live_candle['Close']
+    chg_pips = (live_candle['Close'] - live_candle['Open']) * 10000
+    c1.metric("CENA LIVE (SPOT)", f"{price:.5f}", f"{chg_pips:.1f} pips")
+    
+    # 2. Zegary Światowe
+    clocks = f"BER: {now_berlin.strftime('%H:%M')}\nLON: {datetime.now(TZ_LONDON).strftime('%H:%M')}\nNYC: {datetime.now(TZ_NY).strftime('%H:%M')}"
+    c2.metric("ZEGARY RYNKOWE", now_berlin.strftime('%H:%M:%S'), f"{liq_status}")
+    
+    # 3. Płynność (Wizualizacja)
+    c3.metric("PŁYNNOŚĆ SESJI", f"{liq_val}%", "ACTIVE")
+    
+    # 4. Zmienność Live (Range świecy)
+    rng = (live_candle['High'] - live_candle['Low']) * 10000
+    c4.metric("ZMIENNOŚĆ (1M)", f"{rng:.1f} pips", "MOMENTUM")
 
-    # === TAB 2: SEASONALITY (NEW) ===
-    with tab_season:
-        st.markdown(f"<div class='header-text'>STATYSTYKA DNI TYGODNIA (EDGE FINDER)</div>", unsafe_allow_html=True)
-        
-        df['DayName'] = df.index.day_name()
-        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        
-        # Box Plot dla zwrotów
-        fig_box = px.box(df, x='DayName', y='Log_Ret', color='DayName', 
-                         category_orders={'DayName': days_order}, points=False)
-        fig_box.add_hline(y=0, line_color="white", line_dash="dash")
-        fig_box.update_layout(template='plotly_dark', height=500, margin=dict(t=30), paper_bgcolor='#0f0f0f')
-        st.plotly_chart(fig_box, use_container_width=True)
-        
-        # Tabela statystyk
-        stats = df.groupby('DayName')['Log_Ret'].agg(['mean', 'std', 'count', lambda x: (x>0).mean()])
-        stats.columns = ['Avg Return', 'Volatility', 'Count', 'Win Rate']
-        stats['Win Rate'] = stats['Win Rate'].apply(lambda x: f"{x*100:.1f}%")
-        stats = stats.reindex(days_order)
-        st.dataframe(stats.style.background_gradient(subset=['Avg Return'], cmap='RdYlGn'), use_container_width=True)
-
-    # === TAB 3: VOLATILITY CONE (NEW) ===
-    with tab_vol:
-        st.markdown(f"<div class='header-text'>STOŻEK ZMIENNOŚCI (HISTORICAL CONE)</div>", unsafe_allow_html=True)
-        st.caption("Porównanie obecnej zmienności do historycznych ekstremów. Jeśli biała linia jest nisko = Rynek jest skompresowany (Squeeze).")
-        
-        cone_df, curr_vol_df = calculate_volatility_cone(df)
-        
-        fig_cone = go.Figure()
-        
-        # Max/Min (Szare tło)
-        fig_cone.add_trace(go.Scatter(x=cone_df['Window'], y=cone_df['Max'], mode='lines', line=dict(width=0), showlegend=False))
-        fig_cone.add_trace(go.Scatter(x=cone_df['Window'], y=cone_df['Min'], mode='lines', fill='tonexty', fillcolor='rgba(255,255,255,0.1)', line=dict(width=0), name='Min-Max Range'))
-        
-        # Quartiles (Ciemniejsze tło)
-        fig_cone.add_trace(go.Scatter(x=cone_df['Window'], y=cone_df['Q75'], mode='lines', line=dict(width=0), showlegend=False))
-        fig_cone.add_trace(go.Scatter(x=cone_df['Window'], y=cone_df['Q25'], mode='lines', fill='tonexty', fillcolor='rgba(0,188,212,0.2)', line=dict(width=0), name='Interquartile (Normal)'))
-        
-        # Mediana
-        fig_cone.add_trace(go.Scatter(x=cone_df['Window'], y=cone_df['Median'], mode='lines', line=dict(color='cyan', dash='dash'), name='Median Vol'))
-        
-        # Current Volatility (To jest najważniejsze)
-        fig_cone.add_trace(go.Scatter(x=curr_vol_df['Window'], y=curr_vol_df['Current'], mode='lines+markers', line=dict(color='white', width=3), name='CURRENT STATE'))
-        
-        fig_cone.update_layout(template='plotly_dark', height=500, xaxis_title="Okres (Dni)", yaxis_title="Zmienność Roczna", paper_bgcolor='#0f0f0f')
-        st.plotly_chart(fig_cone, use_container_width=True)
-
+    # Pasek Płynności HTML
+    st.markdown(f"<div style='width:{liq_val}%; height:4px; background-color:#00bcd4; border-radius:2px; margin-bottom:20px;'></div>", unsafe_allow_html=True)
 else:
-    st.info("Wgraj plik CSV aby rozpocząć analizę.")
+    st.error("Błąd połączenia z rynkiem Live.")
+
+# --- SEKCJ 2: GŁÓWNY INTERFEJS (ZAKŁADKI) ---
+tab_live, tab_lab = st.tabs(["⚡ WIZUALIZACJA STRUKTURY (LIVE)", "🧪 LABORATORIUM HISTORYCZNE (CSV)"])
+
+# === ZAKŁADKA 1: LIVE STRUCTURE (Dla Day Tradera) ===
+with tab_live:
+    # Pobieramy dane intraday do budowy krzywej (ostatni miesiąc H1)
+    df_live_analysis = get_analysis_data(ticker, period="1mo", interval="1h")
+    
+    if df_live_analysis is not None:
+        vwap, std, last_p, z = calculate_probability_well(df_live_analysis)
+        
+        c_viz, c_info = st.columns([3, 1])
+        
+        with c_viz:
+            # KRZYWA GAUSSA (Probability Well)
+            x_axis = np.linspace(vwap - 4*std, vwap + 4*std, 500)
+            y_axis = norm.pdf(x_axis, vwap, std)
+            
+            fig = go.Figure()
+            # Tło (Rozkład)
+            fig.add_trace(go.Scatter(x=x_axis, y=y_axis, fill='tozeroy', mode='lines', line=dict(color='#00bcd4', width=2), fillcolor='rgba(0, 188, 212, 0.1)', name='Płynność'))
+            
+            # Kursor Ceny
+            cursor_col = "#ff3333" if abs(z)>2 else "#00ff00"
+            fig.add_vline(x=last_p, line_width=4, line_color=cursor_col)
+            
+            # Linie VWAP i Odchyleń
+            fig.add_vline(x=vwap, line_dash="dash", line_color="white", annotation_text="VWAP")
+            fig.add_vline(x=vwap+2*std, line_color="red", line_width=1, annotation_text="+2σ (Sell)")
+            fig.add_vline(x=vwap-2*std, line_color="green", line_width=1, annotation_text="-2σ (Buy)")
+            
+            fig.update_layout(
+                template='plotly_dark', height=450, 
+                title="MAPA PRAWDOPODOBIEŃSTWA (LIVE)",
+                xaxis_title="Cena", yaxis_visible=False,
+                margin=dict(l=0,r=0,t=40,b=0), paper_bgcolor='#0b0b0b'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # OPIS KONCEPCYJNY
+            st.markdown("""
+            <div class='concept-box'>
+                <div class='concept-title'>💡 KONCEPCJA: STUDNIA PRAWDOPODOBIEŃSTWA</div>
+                Ten wykres zastępuje tradycyjne świece. Pokazuje <b>rozkład statystyczny</b> cen z ostatniego okresu.
+                Szczyt krzywej to <b>VWAP (Fair Value)</b> – tam rynek czuje się najlepiej.
+                Twój cel: Szukać okazji, gdy pionowy kursor (aktualna cena) znajduje się w <b>czerwonych strefach (>2σ)</b>.
+                To oznacza, że cena jest statystycznie "naciągnięta" i istnieje wysokie prawdopodobieństwo powrotu do środka (Mean Reversion).
+            </div>
+            """, unsafe_allow_html=True)
+            
+        with c_info:
+            st.markdown("### SYGNAŁY")
+            st.metric("ODCHYLENIE Z-SCORE", f"{z:.2f}σ", "EXTREME" if abs(z)>2 else "NORMAL", delta_color="inverse")
+            st.metric("DYSTANS DO VWAP", f"{abs(last_p - vwap)*10000:.0f} pips", "POTENCJAŁ")
+            
+            st.info("Jeśli Z-Score > 2.0 -> Statystycznie DROGO (Szukaj Shorta).")
+            st.info("Jeśli Z-Score < -2.0 -> Statystycznie TANIO (Szukaj Longa).")
+
+# === ZAKŁADKA 2: LABORATORIUM (Dla Quanta) ===
+with tab_lab:
+    if uploaded_file is not None:
+        df_hist = load_uploaded_csv(uploaded_file)
+        
+        if df_hist is not None:
+            # Analiza Reżimów
+            df_regime = analyze_regimes_ml(df_hist)
+            last_reg = df_regime.iloc[-1]
+            
+            col_l1, col_l2 = st.columns([2, 1])
+            
+            with col_l1:
+                st.subheader("KLASTERYZACJA REŻIMÓW RYNKU (AI)")
+                # Wykres Reżimów
+                fig_clust = px.scatter(
+                    df_regime, x='Log_Ret', y='Range', color='Regime',
+                    color_continuous_scale=['#4caf50', '#ffeb3b', '#f44336'],
+                    labels={'Log_Ret': 'Zwrot (Trend)', 'Range': 'Zmienność (Ryzyko)'},
+                    title="Mapa Stanów Rynku (Każda kropka to sesja)"
+                )
+                fig_clust.update_layout(template='plotly_dark', height=400, paper_bgcolor='#0b0b0b')
+                st.plotly_chart(fig_clust, use_container_width=True)
+                
+            with col_l2:
+                st.subheader("STATYSTYKA PLIKU")
+                st.write(f"**Liczba Sesji:** {len(df_hist)}")
+                st.write(f"**Data Od:** {df_hist.index.min().date()}")
+                st.write(f"**Data Do:** {df_hist.index.max().date()}")
+                
+                regime_counts = df_regime['Regime'].value_counts(normalize=True)
+                st.write("**Rozkład Reżimów:**")
+                st.write(f"🟢 Spokojny: {regime_counts.get(0,0)*100:.1f}%")
+                st.write(f"🟡 Zmienny: {regime_counts.get(1,0)*100:.1f}%")
+                st.write(f"🔴 Kryzysowy: {regime_counts.get(2,0)*100:.1f}%")
+
+            # OPIS KONCEPCYJNY
+            st.markdown("""
+            <div class='concept-box'>
+                <div class='concept-title'>💡 KONCEPCJA: CLUSTERING ZMIENNOŚCI (GMM)</div>
+                Analiza danych historycznych używa uczenia maszynowego (Gaussian Mixture Model), aby podzielić historię na "stany".
+                Zamiast patrzeć na wykres, patrzysz na strukturę rynku.
+                <b>Zielone punkty</b> to sesje bezpieczne (trendowe). <b>Czerwone punkty</b> to sesje paniczne (wysokie ryzyko).
+                Wiedząc, w jakim klastrze był rynek ostatnio, możesz przewidzieć, jak zachowa się jutro.
+            </div>
+            """, unsafe_allow_html=True)
+            
+        else:
+            st.error("Błąd formatu pliku CSV. Upewnij się, że to format Myfxbook/MT4.")
+    else:
+        st.warning("⚠️ Ta sekcja wymaga danych historycznych.")
+        st.markdown("W panelu bocznym (po lewej) znajdziesz przycisk **'Wgraj plik (CSV)'**. Użyj go, aby załadować swoje dane z Myfxbook i odblokować głęboką analizę.")
+        
+        # Placeholder demo
+        st.caption("Przykładowy widok po wgraniu danych:")
+        st.progress(0)
