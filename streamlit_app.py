@@ -1,256 +1,206 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import pytz
 
-# --- 1. KONFIGURACJA STRONY (Ultra Wide) ---
-st.set_page_config(layout="wide", page_title="EURUSD Pro Terminal", page_icon="🦅", initial_sidebar_state="expanded")
+# --- 1. KONFIGURACJA STRONY ---
+st.set_page_config(layout="wide", page_title="EURUSD Quant Hub", page_icon="🧠")
 
-# --- 2. ZAAWANSOWANY CSS (Inspiracja UIverse + TradingView) ---
+# --- 2. CSS (Quant Style) ---
 st.markdown("""
 <style>
-    /* Reset marginesów - wykorzystujemy każdy piksel */
-    .block-container {
-        padding-top: 0rem;
-        padding-bottom: 0rem;
-        padding-left: 0.5rem;
-        padding-right: 0.5rem;
-        max-width: 100%;
-    }
-    
-    /* Tło aplikacji */
     .stApp { background-color: #0e1117; }
+    .block-container { padding: 0.5rem 1rem; }
     
-    /* CUSTOM CARDS (Zamiast st.metric) */
-    .kpi-card {
-        background-color: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 10px;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        margin-bottom: 10px;
-    }
-    .kpi-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
-    .kpi-value { font-size: 1.4rem; font-family: 'Roboto Mono', monospace; font-weight: bold; color: #e6edf3; }
-    .kpi-delta-up { color: #2ea043; font-size: 0.9rem; }
-    .kpi-delta-down { color: #f85149; font-size: 0.9rem; }
+    /* Stylizacja tabel analitycznych */
+    .dataframe { font-size: 0.8rem !important; }
     
-    /* Ukrycie paska header Streamlit (dla czystego wyglądu) */
-    header {visibility: hidden;}
-    
-    /* Stylizacja Sidebara */
-    [data-testid="stSidebar"] {
-        background-color: #0d1117;
-        border-right: 1px solid #30363d;
-    }
+    /* Nagłówki sekcji */
+    h3 { border-bottom: 2px solid #2ea043; padding-bottom: 5px; margin-top: 0px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. PANEL BOCZNY ---
-with st.sidebar:
-    st.markdown("### 🦅 Sniper Settings")
+# --- 3. WIDGETY TRADINGVIEW (HTML/JS) ---
+# Funkcja pomocnicza do renderowania widgetów
+def tv_chart_widget(symbol="FX:EURUSD", theme="dark"):
+    # Kod embed z TradingView
+    code = f"""
+    <div class="tradingview-widget-container">
+      <div id="tradingview_chart"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget(
+      {{
+        "width": "100%",
+        "height": 600,
+        "symbol": "{symbol}",
+        "interval": "5",
+        "timezone": "Etc/UTC",
+        "theme": "{theme}",
+        "style": "1",
+        "locale": "pl",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "hide_side_toolbar": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_chart"
+      }});
+      </script>
+    </div>
+    """
+    components.html(code, height=600)
+
+def tv_technical_widget(symbol="FX:EURUSD"):
+    code = f"""
+    <div class="tradingview-widget-container">
+      <div class="tradingview-widget-container__widget"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js" async>
+      {{
+      "interval": "5m",
+      "width": "100%",
+      "isTransparent": true,
+      "height": 400,
+      "symbol": "{symbol}",
+      "showIntervalTabs": true,
+      "displayMode": "single",
+      "locale": "pl",
+      "colorTheme": "dark"
+    }}
+      </script>
+    </div>
+    """
+    components.html(code, height=400)
+
+# --- 4. PYTHON ANALYTICAL BRAIN (To jest Twoje 'Centrum Obliczeniowe') ---
+@st.cache_data(ttl=60)
+def run_quant_analysis():
+    # Pobieramy dane do matematyki
+    tickers = "EURUSD=X DX-Y.NYB ^TNX ^DE10Y GC=F" 
+    # ^DE10Y = Niemieckie obligacje (Spread US vs DE to klucz do EURUSD)
     
-    interval = st.selectbox("Timeframe", ["1m", "5m", "15m", "1h", "4h", "1d"], index=1)
+    data = yf.download(tickers, period="1mo", interval="1h", group_by='ticker', progress=False)
+    
+    # Przygotowanie DataFrame'ów
+    eur = data['EURUSD=X']['Close']
+    dxy = data['DX-Y.NYB']['Close']
+    us10y = data['^TNX']['Close']
+    de10y = data['^DE10Y']['Close'] # Może mieć braki, trzeba uważać
+    gold = data['GC=F']['Close']
+    
+    # 1. Yield Spread Analysis (Fundamenty)
+    # Jeśli US yields rosną szybciej niż DE yields -> Dolar zyskuje -> EURUSD spada
+    # Musimy wyrównać indeksy (ffill)
+    common_idx = eur.index
+    us10y = us10y.reindex(common_idx).ffill()
+    de10y = de10y.reindex(common_idx).ffill()
+    spread = us10y - de10y # Spread rentowności
+    
+    # 2. Korelacje (Heatmap Data)
+    df_corr = pd.DataFrame({
+        "EURUSD": eur,
+        "DXY": dxy.reindex(common_idx).ffill(),
+        "Gold": gold.reindex(common_idx).ffill(),
+        "Yield Spread": spread
+    }).tail(50) # Ostatnie 50 godzin handlu
+    
+    correlation_matrix = df_corr.corr()
+    
+    # 3. Z-Score (Czy cena jest statystycznie "za tania" lub "za droga"?)
+    # Liczymy na 20-okresowej średniej
+    ma20 = eur.rolling(20).mean()
+    std20 = eur.rolling(20).std()
+    z_score = (eur.iloc[-1] - ma20.iloc[-1]) / std20.iloc[-1]
+    
+    # 4. Volatility Scanner (ATR - Average True Range)
+    high = data['EURUSD=X']['High']
+    low = data['EURUSD=X']['Low']
+    tr = high - low
+    atr_current = tr.tail(5).mean()
+    atr_historical = tr.tail(100).mean()
+    volatility_ratio = atr_current / atr_historical
+    
+    return correlation_matrix, z_score, spread.iloc[-1], volatility_ratio, eur.iloc[-1]
+
+# --- 5. UKŁAD STRONY (LAYOUT) ---
+
+st.title("🦅 EUR/USD Quant Command Center")
+
+# Uruchamiamy mózg analityczny
+try:
+    corr_matrix, z_score, current_spread, vol_ratio, current_price = run_quant_analysis()
+    
+    # --- GÓRNY PASEK METRYK (Obliczone przez Pythona) ---
+    col1, col2, col3, col4 = st.columns(4)
+    
+    col1.metric("EURUSD Cena", f"{current_price:.5f}")
+    
+    # Z-SCORE Logic
+    z_color = "normal"
+    if z_score > 2.0: z_color = "inverse" # Wykupiony (Overbought)
+    if z_score < -2.0: z_color = "inverse" # Wyprzedany (Oversold)
+    col2.metric("Statystyka (Z-Score)", f"{z_score:.2f}σ", delta_color=z_color, 
+                help="Powyżej 2.0 = Statystycznie drogo (Możliwa korekta). Poniżej -2.0 = Statystycznie tanio.")
+    
+    # Spread Obligacji
+    col3.metric("US-DE Yield Spread", f"{current_spread:.3f}%", 
+                help="Różnica między obligacjami USA i Niemiec. Kluczowy driver fundamentalny.")
+    
+    # Zmienność
+    vol_state = "Niska"
+    if vol_ratio > 1.2: vol_state = "🔥 WYSOKA"
+    elif vol_ratio < 0.8: vol_state = "💤 Uśpienie"
+    col4.metric("Zmienność (vs Norm)", f"{vol_ratio:.2f}", vol_state)
+
+except Exception as e:
+    st.error(f"Inicjalizacja silnika analitycznego... (Może brakować danych historycznych) {e}")
+
+
+# --- GŁÓWNY GRID ---
+c_left, c_right = st.columns([3, 1]) # 75% Wykres / 25% Analiza
+
+with c_left:
+    st.markdown("### 📈 Live Market Data")
+    # Tu wstawiamy potężny widget TradingView
+    tv_chart_widget(symbol="FX:EURUSD", theme="dark")
+
+with c_right:
+    st.markdown("### 🧠 Quant Brain")
+    
+    # Widget Techniczny (Tachometer)
+    st.caption("Sentyment Techniczny (Oscylatory + Średnie)")
+    tv_technical_widget(symbol="FX:EURUSD")
     
     st.divider()
     
-    st.markdown("Expected Trading Range")
-    st.info("Obliczamy zakres na podstawie ATR (zmienności).")
-    
-    show_ema = st.toggle("EMA Cloud (20/50)", value=True)
-    show_pivots = st.toggle("Pivot Points", value=True)
-    
-    if st.button("🔄 Force Refresh", use_container_width=True):
-        st.cache_data.clear()
-
-# --- 4. ENGINE DANYCH ---
-@st.cache_data(ttl=30)
-def get_market_data(interval):
-    # Okresy dopasowane do scalpingu
-    p_map = {"1m": "2d", "5m": "5d", "15m": "1mo", "1h": "3mo", "4h": "1y", "1d": "2y"}
-    
-    try:
-        # Pobieramy dane
-        tickers = "EURUSD=X DX-Y.NYB ^TNX"
-        data = yf.download(tickers, period=p_map[interval], interval=interval, group_by='ticker', progress=False)
-        
-        # Obsługa MultiIndex i czyszczenie
-        eur = data['EURUSD=X'].copy()
-        dxy = data['DX-Y.NYB'].copy()
-        tnx = data['^TNX'].copy()
-        
-        # FILL NAN: Kluczowe dla DXY i Yields (One mają luki, Forex nie)
-        # Metoda: Resample do interwału + Forward Fill
-        dxy = dxy.resample(interval.replace('m', 'min')).ffill().reindex(eur.index, method='ffill')
-        tnx = tnx.resample(interval.replace('m', 'min')).ffill().reindex(eur.index, method='ffill')
-        
-        return eur, dxy, tnx
-    except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-df_eur, df_dxy, df_tnx = get_market_data(interval)
-
-# --- 5. INTERFEJS: TOP BAR (HTML/CSS Metrics) ---
-if not df_eur.empty:
-    last = df_eur['Close'].iloc[-1]
-    prev = df_eur['Close'].iloc[-2]
-    change = last - prev
-    pct = (change / prev) * 100
-    color_cls = "kpi-delta-up" if change >= 0 else "kpi-delta-down"
-    sign = "+" if change >= 0 else ""
-    
-    dxy_last = df_dxy['Close'].iloc[-1]
-    tnx_last = df_tnx['Close'].iloc[-1]
-    
-    # KORELACJA (30 świec)
-    corr = df_eur['Close'].tail(30).corr(df_dxy['Close'].tail(30))
-    corr_color = "#f85149" if corr > -0.5 else "#2ea043" # Czerwony jeśli korelacja słabnie (dla EURUSD powinna być silnie ujemna)
-
-    # Używamy HTML columns zamiast st.metric dla lepszego layoutu
-    cols = st.columns(4)
-    
-    # KPI 1: EURUSD
-    cols[0].markdown(f"""
-    <div class="kpi-card">
-        <div class="kpi-label">EUR / USD</div>
-        <div class="kpi-value">{last:.5f}</div>
-        <div class="{color_cls}">{sign}{change*10000:.1f} pips ({pct:.2f}%)</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # KPI 2: DXY
-    cols[1].markdown(f"""
-    <div class="kpi-card">
-        <div class="kpi-label">DOLLAR INDEX (DXY)</div>
-        <div class="kpi-value">{dxy_last:.2f}</div>
-        <div style="font-size: 0.8rem; color: #8b949e;">Inverse Driver</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # KPI 3: CORRELATION
-    cols[2].markdown(f"""
-    <div class="kpi-card">
-        <div class="kpi-label">DXY CORRELATION</div>
-        <div class="kpi-value" style="color: {corr_color}">{corr:.2f}</div>
-        <div style="font-size: 0.8rem; color: #8b949e;">Target: < -0.80</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # KPI 4: SESSION
-    now_hour = datetime.now(pytz.utc).hour
-    session_name = "Asian / Off"
-    session_color = "#8b949e"
-    if 7 <= now_hour < 16: session_name, session_color = "LONDON", "#2ea043"
-    if 12 <= now_hour < 21: session_name, session_color = "NEW YORK", "#d29922"
-    if 12 <= now_hour < 16: session_name, session_color = "⚡ OVERLAP", "#f85149"
-    
-    cols[3].markdown(f"""
-    <div class="kpi-card">
-        <div class="kpi-label">ACTIVE SESSION</div>
-        <div class="kpi-value" style="color: {session_color}">{session_name}</div>
-        <div style="font-size: 0.8rem; color: #8b949e;">UTC: {now_hour}:00</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # --- 6. WYKRES GŁÓWNY (TradingView Style) ---
-    
-    # Tworzenie subplotów: Główny (0.8) + Wolumen/Oscylator (0.2)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.8, 0.2])
-
-    # A. ŚWIECE
-    fig.add_trace(go.Candlestick(
-        x=df_eur.index,
-        open=df_eur['Open'], high=df_eur['High'], low=df_eur['Low'], close=df_eur['Close'],
-        name="Price",
-        increasing_line_color='#2ea043', increasing_fillcolor='#2ea043', # GitHub Green
-        decreasing_line_color='#f85149', decreasing_fillcolor='#f85149'  # GitHub Red
-    ), row=1, col=1)
-
-    # B. WSKAŹNIKI (EMA CLOUD)
-    if show_ema:
-        ema20 = df_eur['Close'].ewm(span=20).mean()
-        ema50 = df_eur['Close'].ewm(span=50).mean()
-        fig.add_trace(go.Scatter(x=df_eur.index, y=ema20, line=dict(color='#2196F3', width=1), name="EMA 20"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_eur.index, y=ema50, line=dict(color='#FF9800', width=1), name="EMA 50"), row=1, col=1)
-
-    # C. PIVOT POINTS
-    if show_pivots:
-        # Prosta kalkulacja dzienna
-        high_d = df_eur['High'].max()
-        low_d = df_eur['Low'].min()
-        close_d = df_eur['Close'].iloc[-1]
-        pp = (high_d + low_d + close_d) / 3
-        fig.add_hline(y=pp, line_dash="dash", line_color="white", opacity=0.3, row=1, col=1, annotation_text="PV")
-
-    # D. DOLNY PANEL (RSI lub Wolumen)
-    # Ponieważ Forex nie ma realnego wolumenu w yfinance, używamy RSI jako proxy momentum
-    delta = df_eur['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    fig.add_trace(go.Scatter(x=df_eur.index, y=rsi, line=dict(color='#A020F0', width=2), name="RSI"), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="#333", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#333", row=2, col=1)
-
-    # E. LAYOUT CONFIG (Kluczowe dla UX)
-    fig.update_layout(
-        height=650, # Wysoki wykres
-        margin=dict(l=0, r=50, t=10, b=0), # Margines po prawej na etykiety cen
-        paper_bgcolor="#0e1117", # Tło zgodne z aplikacją
-        plot_bgcolor="#0e1117",
-        showlegend=False,
-        dragmode='pan', # Domyślnie "rączka" do przesuwania
-        xaxis=dict(
-            rangeslider=dict(visible=False), # Ukrywamy suwak na dole
-            type="date",
-            showgrid=True, gridcolor="#1f242d"
-        ),
-        yaxis=dict(
-            side="right", # Cena po prawej stronie (jak w TradingView)
-            showgrid=True, gridcolor="#1f242d",
-            tickformat=".5f"
-        ),
-        yaxis2=dict(
-            side="right",
-            showgrid=False,
-            range=[0, 100] # RSI Range
+    # Tabela Korelacji (Wyliczona w Pythonie)
+    st.caption("🔥 Correlation Matrix (Last 50h)")
+    # Formatowanie tabeli kolorami
+    if 'corr_matrix' in locals():
+        st.dataframe(
+            corr_matrix.style.background_gradient(cmap='RdYlGn', vmin=-1, vmax=1).format("{:.2f}"),
+            use_container_width=True
         )
-    )
-    
-    # Ukrywanie weekendów
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        st.info("💡 Jeśli EURUSD vs Yield Spread jest dodatnie (>0.5), rynek gra pod stopy procentowe.")
 
-    # WYŚWIETLANIE Z KONFIGURACJĄ ZOOM
-    st.plotly_chart(fig, use_container_width=True, config={
-        'scrollZoom': True,       # Przybliżanie kółkiem myszy
-        'displayModeBar': True,   # Pasek narzędzi
-        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
-        'displaylogo': False
-    })
+# --- DOLNY PANEL (MACRO) ---
+st.markdown("### 📅 Kalendarz Ekonomiczny & News")
 
-    # --- 7. MARKET DEPTH & NEWS (Split Layout) ---
-    c_left, c_right = st.columns([2, 1])
-    
-    with c_left:
-        st.markdown("##### 📝 Notatki / Poziomy")
-        st.text_area("Trading Plan", height=100, placeholder="Np. Czekam na retest poziomu 1.0550, Stop Loss poniżej wicka...")
-        
-    with c_right:
-        st.markdown("##### 📊 Imbalance (Trend)")
-        # Prosta wizualizacja trendu na ostatnich 10 świecach
-        last_10 = df_eur.tail(10)
-        bullish = len(last_10[last_10['Close'] > last_10['Open']])
-        bearish = len(last_10) - bullish
-        
-        st.write(f"Ostatnie 10 świec: {bullish} Up / {bearish} Down")
-        st.progress(bullish / 10) # Pasek postępu (Bullishness)
-
-else:
-    st.warning("Pobieranie danych... Jeśli trwa to długo, odśwież stronę.")
+# Widget Kalendarza TradingView
+calendar_code = """
+<div class="tradingview-widget-container">
+  <div class="tradingview-widget-container__widget"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-events.js" async>
+  {
+  "colorTheme": "dark",
+  "isTransparent": false,
+  "width": "100%",
+  "height": "400",
+  "locale": "pl",
+  "importanceFilter": "-1,0,1",
+  "currencyFilter": "USD,EUR"
+}
+  </script>
+</div>
+"""
+components.html(calendar_code, height=400)
