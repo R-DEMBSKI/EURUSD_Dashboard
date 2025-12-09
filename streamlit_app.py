@@ -1,206 +1,229 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
+import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
+from datetime import datetime
+import pytz
 
-# --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(layout="wide", page_title="EURUSD Quant Hub", page_icon="🧠")
+# --- 1. KONFIGURACJA STRONY (Full Wide Mode) ---
+st.set_page_config(layout="wide", page_title="EURUSD Terminal Pro", page_icon="🦅")
 
-# --- 2. CSS (Quant Style) ---
+# --- 2. CSS STYLING (To jest klucz do tego wyglądu) ---
 st.markdown("""
 <style>
-    .stApp { background-color: #0e1117; }
-    .block-container { padding: 0.5rem 1rem; }
+    /* TŁO I GŁÓWNY KONTENER */
+    .stApp { background-color: #0E1117; } /* Bardzo ciemne tło */
+    .block-container { 
+        padding-top: 1rem; 
+        padding-left: 1rem; 
+        padding-right: 1rem; 
+        max-width: 100%; 
+    }
+
+    /* UKRYCIE ELEMENTÓW STREAMLIT */
+    header { visibility: hidden; }
+    footer { visibility: hidden; }
+
+    /* STYLIZACJA KAFELKÓW (Metrics) */
+    .metric-box {
+        background-color: #161B22; /* Trochę jaśniejszy szary */
+        border: 1px solid #30363D;
+        border-radius: 6px;
+        padding: 15px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .metric-label { font-size: 0.8rem; color: #8B949E; text-transform: uppercase; letter-spacing: 1px; }
+    .metric-value { font-size: 1.6rem; font-family: 'Roboto Mono', monospace; font-weight: 700; color: #E6EDF3; }
+    .metric-delta-pos { color: #3FB950; font-size: 0.9rem; font-weight: bold; }
+    .metric-delta-neg { color: #F85149; font-size: 0.9rem; font-weight: bold; }
+
+    /* STYLIZACJA PRZYCISKU SESJI (Pill Button) */
+    .session-box {
+        background-color: #1F6FEB;
+        color: white;
+        padding: 5px 15px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: bold;
+        display: inline-block;
+        margin-top: 10px;
+    }
     
-    /* Stylizacja tabel analitycznych */
-    .dataframe { font-size: 0.8rem !important; }
-    
-    /* Nagłówki sekcji */
-    h3 { border-bottom: 2px solid #2ea043; padding-bottom: 5px; margin-top: 0px; }
+    /* GLOBALNY TEXT */
+    p, label, span { color: #C9D1D9; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. WIDGETY TRADINGVIEW (HTML/JS) ---
-# Funkcja pomocnicza do renderowania widgetów
-def tv_chart_widget(symbol="FX:EURUSD", theme="dark"):
-    # Kod embed z TradingView
-    code = f"""
-    <div class="tradingview-widget-container">
-      <div id="tradingview_chart"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget(
-      {{
-        "width": "100%",
-        "height": 600,
-        "symbol": "{symbol}",
-        "interval": "5",
-        "timezone": "Etc/UTC",
-        "theme": "{theme}",
-        "style": "1",
-        "locale": "pl",
-        "toolbar_bg": "#f1f3f6",
-        "enable_publishing": false,
-        "hide_side_toolbar": false,
-        "allow_symbol_change": true,
-        "container_id": "tradingview_chart"
-      }});
-      </script>
-    </div>
-    """
-    components.html(code, height=600)
+# --- 3. DANE (SZYBKI CACHE) ---
+@st.cache_data(ttl=30) # Odświeżanie co 30 sek
+def get_data():
+    # Pobieramy EURUSD, DXY i Zmienność
+    tickers = "EURUSD=X DX-Y.NYB"
+    data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', progress=False)
+    return data
 
-def tv_technical_widget(symbol="FX:EURUSD"):
-    code = f"""
-    <div class="tradingview-widget-container">
-      <div class="tradingview-widget-container__widget"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js" async>
-      {{
-      "interval": "5m",
-      "width": "100%",
-      "isTransparent": true,
-      "height": 400,
-      "symbol": "{symbol}",
-      "showIntervalTabs": true,
-      "displayMode": "single",
-      "locale": "pl",
-      "colorTheme": "dark"
-    }}
-      </script>
-    </div>
-    """
-    components.html(code, height=400)
-
-# --- 4. PYTHON ANALYTICAL BRAIN (To jest Twoje 'Centrum Obliczeniowe') ---
-@st.cache_data(ttl=60)
-def run_quant_analysis():
-    # Pobieramy dane do matematyki
-    tickers = "EURUSD=X DX-Y.NYB ^TNX ^DE10Y GC=F" 
-    # ^DE10Y = Niemieckie obligacje (Spread US vs DE to klucz do EURUSD)
-    
-    data = yf.download(tickers, period="1mo", interval="1h", group_by='ticker', progress=False)
-    
-    # Przygotowanie DataFrame'ów
-    eur = data['EURUSD=X']['Close']
-    dxy = data['DX-Y.NYB']['Close']
-    us10y = data['^TNX']['Close']
-    de10y = data['^DE10Y']['Close'] # Może mieć braki, trzeba uważać
-    gold = data['GC=F']['Close']
-    
-    # 1. Yield Spread Analysis (Fundamenty)
-    # Jeśli US yields rosną szybciej niż DE yields -> Dolar zyskuje -> EURUSD spada
-    # Musimy wyrównać indeksy (ffill)
-    common_idx = eur.index
-    us10y = us10y.reindex(common_idx).ffill()
-    de10y = de10y.reindex(common_idx).ffill()
-    spread = us10y - de10y # Spread rentowności
-    
-    # 2. Korelacje (Heatmap Data)
-    df_corr = pd.DataFrame({
-        "EURUSD": eur,
-        "DXY": dxy.reindex(common_idx).ffill(),
-        "Gold": gold.reindex(common_idx).ffill(),
-        "Yield Spread": spread
-    }).tail(50) # Ostatnie 50 godzin handlu
-    
-    correlation_matrix = df_corr.corr()
-    
-    # 3. Z-Score (Czy cena jest statystycznie "za tania" lub "za droga"?)
-    # Liczymy na 20-okresowej średniej
-    ma20 = eur.rolling(20).mean()
-    std20 = eur.rolling(20).std()
-    z_score = (eur.iloc[-1] - ma20.iloc[-1]) / std20.iloc[-1]
-    
-    # 4. Volatility Scanner (ATR - Average True Range)
-    high = data['EURUSD=X']['High']
-    low = data['EURUSD=X']['Low']
-    tr = high - low
-    atr_current = tr.tail(5).mean()
-    atr_historical = tr.tail(100).mean()
-    volatility_ratio = atr_current / atr_historical
-    
-    return correlation_matrix, z_score, spread.iloc[-1], volatility_ratio, eur.iloc[-1]
-
-# --- 5. UKŁAD STRONY (LAYOUT) ---
-
-st.title("🦅 EUR/USD Quant Command Center")
-
-# Uruchamiamy mózg analityczny
+# Pobranie danych
 try:
-    corr_matrix, z_score, current_spread, vol_ratio, current_price = run_quant_analysis()
+    data = get_data()
+    df_eur = data['EURUSD=X']
+    df_dxy = data['DX-Y.NYB']
     
-    # --- GÓRNY PASEK METRYK (Obliczone przez Pythona) ---
-    col1, col2, col3, col4 = st.columns(4)
+    # Obsługa braków danych (Forward Fill)
+    df_dxy = df_dxy.resample('15min').ffill().reindex(df_eur.index, method='ffill')
+
+    # Ostatnie wartości
+    last_price = df_eur['Close'].iloc[-1]
+    prev_price = df_eur['Close'].iloc[-2]
+    change = last_price - prev_price
+    pct_change = (change / prev_price) * 100
     
-    col1.metric("EURUSD Cena", f"{current_price:.5f}")
-    
-    # Z-SCORE Logic
-    z_color = "normal"
-    if z_score > 2.0: z_color = "inverse" # Wykupiony (Overbought)
-    if z_score < -2.0: z_color = "inverse" # Wyprzedany (Oversold)
-    col2.metric("Statystyka (Z-Score)", f"{z_score:.2f}σ", delta_color=z_color, 
-                help="Powyżej 2.0 = Statystycznie drogo (Możliwa korekta). Poniżej -2.0 = Statystycznie tanio.")
-    
-    # Spread Obligacji
-    col3.metric("US-DE Yield Spread", f"{current_spread:.3f}%", 
-                help="Różnica między obligacjami USA i Niemiec. Kluczowy driver fundamentalny.")
-    
-    # Zmienność
-    vol_state = "Niska"
-    if vol_ratio > 1.2: vol_state = "🔥 WYSOKA"
-    elif vol_ratio < 0.8: vol_state = "💤 Uśpienie"
-    col4.metric("Zmienność (vs Norm)", f"{vol_ratio:.2f}", vol_state)
+    dxy_last = df_dxy['Close'].iloc[-1]
+    dxy_change = dxy_last - df_dxy['Close'].iloc[-2]
+
+    # Obliczenie Volatility (ATR-like)
+    high_low = df_eur['High'] - df_eur['Low']
+    volatility = high_low.tail(10).mean() * 10000 # w pipsach
 
 except Exception as e:
-    st.error(f"Inicjalizacja silnika analitycznego... (Może brakować danych historycznych) {e}")
+    st.error("Ładowanie danych...")
+    st.stop()
 
+# --- 4. LAYOUT: GÓRNY PASEK (KPIs) ---
+# Używamy HTML/CSS zamiast st.metric dla idealnego wyglądu "kafelków"
+col1, col2, col3, col4 = st.columns(4)
 
-# --- GŁÓWNY GRID ---
-c_left, c_right = st.columns([3, 1]) # 75% Wykres / 25% Analiza
+def kpi_card(label, value, delta, is_pct=False):
+    color_class = "metric-delta-pos" if delta >= 0 else "metric-delta-neg"
+    sign = "+" if delta >= 0 else ""
+    delta_str = f"{sign}{delta:.2f}%" if is_pct else f"{sign}{delta:.4f}"
+    return f"""
+    <div class="metric-box">
+        <div class="metric-label">{label}</div>
+        <div class="metric-value">{value}</div>
+        <div class="{color_class}">{delta_str}</div>
+    </div>
+    """
 
-with c_left:
-    st.markdown("### 📈 Live Market Data")
-    # Tu wstawiamy potężny widget TradingView
-    tv_chart_widget(symbol="FX:EURUSD", theme="dark")
+with col1: st.markdown(kpi_card("EUR / USD", f"{last_price:.5f}", pct_change, is_pct=True), unsafe_allow_html=True)
+with col2: st.markdown(kpi_card("DOLLAR INDEX", f"{dxy_last:.2f}", dxy_change), unsafe_allow_html=True)
+with col3: st.markdown(kpi_card("CORRELATION (50)", f"{df_eur['Close'].tail(50).corr(df_dxy['Close'].tail(50)):.2f}", 0.0), unsafe_allow_html=True)
+with col4: st.markdown(kpi_card("AVG VOLATILITY (10)", f"{volatility:.1f} pips", 0.0), unsafe_allow_html=True)
 
-with c_right:
-    st.markdown("### 🧠 Quant Brain")
+st.markdown("---") # Cienka linia oddzielająca
+
+# --- 5. LAYOUT: GŁÓWNA SEKCJA (WYKRES + SIDEBAR) ---
+# Dzielimy ekran: Lewa (Wykres 75%) | Prawa (Market Depth 25%)
+col_chart, col_sidebar = st.columns([3, 1])
+
+with col_chart:
+    # --- A. WYKRES GŁÓWNY (Stylizowany na Area Chart jak na screenie) ---
+    st.markdown("##### 📉 EURUSD Price Action")
     
-    # Widget Techniczny (Tachometer)
-    st.caption("Sentyment Techniczny (Oscylatory + Średnie)")
-    tv_technical_widget(symbol="FX:EURUSD")
-    
-    st.divider()
-    
-    # Tabela Korelacji (Wyliczona w Pythonie)
-    st.caption("🔥 Correlation Matrix (Last 50h)")
-    # Formatowanie tabeli kolorami
-    if 'corr_matrix' in locals():
-        st.dataframe(
-            corr_matrix.style.background_gradient(cmap='RdYlGn', vmin=-1, vmax=1).format("{:.2f}"),
-            use_container_width=True
-        )
-        st.info("💡 Jeśli EURUSD vs Yield Spread jest dodatnie (>0.5), rynek gra pod stopy procentowe.")
+    fig = go.Figure()
 
-# --- DOLNY PANEL (MACRO) ---
-st.markdown("### 📅 Kalendarz Ekonomiczny & News")
+    # Wykres liniowy z wypełnieniem (Area Chart)
+    fig.add_trace(go.Scatter(
+        x=df_eur.index, y=df_eur['Close'],
+        mode='lines',
+        fill='tozeroy', # Wypełnienie pod wykresem
+        name='Price',
+        line=dict(color='#2E9AFE', width=2), # Jasnoniebieski
+        fillcolor='rgba(46, 154, 254, 0.1)' # Przezroczyste wypełnienie
+    ))
 
-# Widget Kalendarza TradingView
-calendar_code = """
-<div class="tradingview-widget-container">
-  <div class="tradingview-widget-container__widget"></div>
-  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-events.js" async>
-  {
-  "colorTheme": "dark",
-  "isTransparent": false,
-  "width": "100%",
-  "height": "400",
-  "locale": "pl",
-  "importanceFilter": "-1,0,1",
-  "currencyFilter": "USD,EUR"
-}
-  </script>
-</div>
-"""
-components.html(calendar_code, height=400)
+    # Dodanie prostej średniej
+    fig.add_trace(go.Scatter(
+        x=df_eur.index, y=df_eur['Close'].rolling(50).mean(),
+        mode='lines',
+        name='SMA 50',
+        line=dict(color='#FF9F1C', width=1, dash='dot')
+    ))
+
+    # Konfiguracja wyglądu (Grid, Tło)
+    fig.update_layout(
+        height=550,
+        margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='#0E1117',
+        showlegend=False,
+        xaxis=dict(showgrid=True, gridcolor='#1F242D', gridwidth=1),
+        yaxis=dict(showgrid=True, gridcolor='#1F242D', gridwidth=1, side='right') # Cena po prawej
+    )
+    
+    # Ukrywanie weekendów
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    
+    st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False})
+    
+    # --- B. WYKRES KORELACJI (Pod spodem, mniejszy) ---
+    # Symulacja oscylatora na dole (np. RSI lub Correlation)
+    st.markdown("##### 📊 DXY Correlation Check")
+    fig_corr = go.Figure()
+    fig_corr.add_trace(go.Scatter(
+        x=df_eur.index, y=df_eur['Close'].rolling(30).corr(df_dxy['Close'].rolling(30)),
+        line=dict(color='#F85149', width=1.5)
+    ))
+    fig_corr.update_layout(height=150, margin=dict(t=0, b=0, l=10, r=10), 
+                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#0E1117',
+                           xaxis=dict(showticklabels=False, showgrid=False),
+                           yaxis=dict(showgrid=True, gridcolor='#1F242D'))
+    st.plotly_chart(fig_corr, use_container_width=True, config={'staticPlot': True})
+
+with col_sidebar:
+    # --- C. MARKET DEPTH (Symulacja UI z prawej strony) ---
+    st.markdown("##### 🧱 Market Depth")
+    
+    # Tworzymy wykres słupkowy poziomy, symulujący Order Book
+    # Generujemy sztuczne dane, aby wyglądało jak na screenie (Bid/Ask volume)
+    depth_data = pd.DataFrame({
+        "Price": [last_price + i*0.0005 for i in range(-5, 6)],
+        "Volume": np.random.randint(100, 1000, 11),
+        "Type": ["Ask"]*5 + ["Spread"] + ["Bid"]*5
+    })
+    
+    colors = ['#F85149' if t == "Ask" else '#3FB950' for t in depth_data['Type']]
+    
+    fig_depth = go.Figure(go.Bar(
+        x=depth_data['Volume'],
+        y=depth_data['Price'],
+        orientation='h', # Poziomy
+        marker_color=colors,
+        text=depth_data['Volume'],
+        textposition='inside',
+        insidetextanchor='middle'
+    ))
+    
+    fig_depth.update_layout(
+        height=400,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='#0E1117',
+        xaxis=dict(visible=False),
+        yaxis=dict(showticklabels=True, tickformat=".4f", color="#8B949E"),
+        bargap=0.1
+    )
+    st.plotly_chart(fig_depth, use_container_width=True, config={'displayModeBar': False})
+
+    # --- D. SESJA (Pill Button) ---
+    st.markdown("##### 🌍 Status Sesji")
+    
+    utc_now = datetime.now(pytz.utc).hour
+    session_label = "OFFLINE"
+    if 7 <= utc_now < 16: session_label = "🇬🇧 LONDON OPEN"
+    elif 12 <= utc_now < 21: session_label = "🇺🇸 NEW YORK OPEN"
+    
+    # HTML Pill Button
+    st.markdown(f"""
+    <div style="text-align: left;">
+        <span class="session-box">{session_label}</span>
+    </div>
+    <div style="margin-top: 10px; font-size: 0.8rem; color: #8B949E;">
+        Current UTC: {utc_now}:00
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Notatnik
+    st.markdown("##### 📝 Notatki")
+    st.text_area("Plan:", height=150, placeholder="Czekam na retest poziomu...", label_visibility="collapsed")
