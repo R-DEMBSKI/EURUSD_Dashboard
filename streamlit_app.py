@@ -4,105 +4,81 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy.stats import zscore
-from datetime import datetime, time
+from scipy.stats import norm
+from datetime import datetime
 import pytz
 
-# --- 1. KONFIGURACJA UI (IBKR TWS STYLE) ---
-st.set_page_config(layout="wide", page_title="EURUSD BERLIN DESK", page_icon="🦅", initial_sidebar_state="collapsed")
+# --- 1. KONFIGURACJA UI (ULTRA MINIMAL QUANT) ---
+st.set_page_config(layout="wide", page_title="EURUSD QUANTUM CORE", page_icon="⚛️", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-    /* GLOBALNY RESET - GŁĘBOKA CZERŃ */
-    .stApp { background-color: #000000; color: #e0e0e0; font-family: 'Consolas', 'Roboto Mono', monospace; }
-    
-    /* Ukrycie marginesów Streamlit */
-    .block-container { padding: 0.5rem 1rem; max-width: 100%; }
+    /* GLOBAL RESET - DEEP BLACK */
+    .stApp { background-color: #000000; color: #c0c0c0; font-family: 'Roboto Mono', monospace; }
+    .block-container { padding: 0.5rem; max-width: 100%; }
     header, footer {visibility: hidden;}
     
-    /* MODUŁY I NAGŁÓWKI (TWS BLUE HEADER) */
-    .module-container { border: 1px solid #333; margin-bottom: 5px; background-color: #111; }
+    /* MODUŁY */
+    .module-container { background-color: #0a0a0a; border: 1px solid #222; margin-bottom: 10px; padding: 5px; }
     .module-header {
-        background-color: #1a237e; /* IBKR Deep Blue */
-        color: #fff; padding: 3px 8px; font-size: 0.75rem; font-weight: bold;
-        border-bottom: 1px solid #444; letter-spacing: 0.5px;
-        display: flex; justify_content: space-between; align-items: center;
+        color: #00bcd4; font-size: 0.8rem; font-weight: bold; letter-spacing: 1px;
+        margin-bottom: 5px; border-bottom: 1px solid #222; padding-bottom: 2px;
+        text-transform: uppercase;
     }
     
-    /* KPI METRICS (KWADRATOWE) */
+    /* KPI METRICS (Kompaktowe) */
     div[data-testid="stMetric"] {
-        background-color: #0a0a0a; border: 1px solid #333; padding: 5px; border-radius: 0px;
+        background-color: #080808; border: 1px solid #222; padding: 8px; border-radius: 0px;
     }
-    div[data-testid="stMetricLabel"] { font-size: 0.65rem !important; color: #888; text-transform: uppercase; }
-    div[data-testid="stMetricValue"] { font-size: 1.1rem !important; color: #fff; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { font-size: 0.6rem !important; color: #666; }
+    div[data-testid="stMetricValue"] { font-size: 1.2rem !important; color: #eee; font-weight: 700; }
     
-    /* TABELE (NEWS/CALENDAR) */
-    .dataframe { font-size: 0.75rem !important; font-family: 'Arial', sans-serif; }
+    /* Visualization Container */
+    .viz-container {
+        border: 1px solid #333;
+        background: radial-gradient(circle at center, #111 0%, #000 100%);
+        height: 600px;
+    }
     
-    /* ZAKŁADKI */
+    /* TABS & TABLES */
     .stTabs [data-baseweb="tab-list"] { gap: 1px; background-color: #000; }
-    .stTabs [data-baseweb="tab"] {
-        height: 25px; background-color: #222; color: #aaa; border: 1px solid #333; 
-        border-bottom: none; border-radius: 0px; font-size: 0.75rem; padding: 0 10px;
-    }
-    .stTabs [aria-selected="true"] { background-color: #1a237e; color: white; border: 1px solid #1a237e; }
-    
-    /* SCROLLBAR */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #000; }
-    ::-webkit-scrollbar-thumb { background: #333; }
+    .stTabs [data-baseweb="tab"] { height: 30px; background-color: #111; color: #888; border: 1px solid #222; border-radius: 0px; font-size: 0.7rem; }
+    .stTabs [aria-selected="true"] { background-color: #00bcd4; color: #000; }
+    .dataframe { font-size: 0.7rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 2. QUANT ENGINE ---
-
-# Definicja strefy czasowej
 BERLIN_TZ = pytz.timezone('Europe/Berlin')
 
 @st.cache_data(ttl=60)
 def get_data(ticker, interval, period):
-    """Pobiera dane i konwertuje na czas Berlin."""
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-        
-        # Konwersja czasu
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
+        if df.index.tz is None: df.index = df.index.tz_localize('UTC')
         df.index = df.index.tz_convert(BERLIN_TZ)
-        
         return df
-    except Exception as e:
-        return None
+    except: return None
 
-@st.cache_data(ttl=300)
-def get_intel_data(ticker):
-    """Pobiera Newsy i Kalendarz (Safe Mode)."""
-    t = yf.Ticker(ticker)
-    news = t.news[:6] if hasattr(t, 'news') else []
-    # Kalendarz często jest pusty dla Forex, więc robimy fallback
-    cal = t.calendar if hasattr(t, 'calendar') else {}
-    return news, cal
-
-def calculate_metrics(df):
-    """Główna matematyka."""
-    if df is None: return None
+def calculate_stats(df):
+    if df is None: return None, None, None, None
     
-    # 1. Kalman Proxy & VWAP
-    df['Kalman'] = df['Close'].ewm(span=8).mean()
+    # VWAP (Cena ważona wolumenem - nasze "Fair Value")
     v = df['Volume'].values
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     df['VWAP'] = (tp * v).cumsum() / v.cumsum()
+    current_vwap = df['VWAP'].iloc[-1]
     
-    # 2. Z-Score (Mean Reversion)
-    roll_mean = df['Close'].rolling(50).mean()
-    roll_std = df['Close'].rolling(50).std()
-    df['Z_Score'] = (df['Close'] - roll_mean) / roll_std
-    df['Upper'] = roll_mean + 2*roll_std
-    df['Lower'] = roll_mean - 2*roll_std
+    # Odchylenie Standardowe (Zmienność)
+    std_dev = df['Close'].std()
     
-    # 3. Hurst
+    # Z-Score (Odległość od VWAP w odchyleniach)
+    last_price = df['Close'].iloc[-1]
+    z_score = (last_price - current_vwap) / std_dev
+    
+    # Hurst Exponent
     try:
         lags = range(2, 20)
         ts = df['Close'].tail(100).values
@@ -110,168 +86,124 @@ def calculate_metrics(df):
         poly = np.polyfit(np.log(lags), np.log(tau), 1)
         hurst = poly[0] * 2.0
     except: hurst = 0.5
-    
-    # 4. Liquidity Sessions (Berlin Time)
-    # Asia: 22:00-07:00 | London: 08:00-16:00 | NY: 13:00-21:00
-    df['Hour'] = df.index.hour
-    conditions = [
-        (df['Hour'] >= 8) & (df['Hour'] < 16), # London
-        (df['Hour'] >= 13) & (df['Hour'] < 21), # NY
-        (df['Hour'] >= 22) | (df['Hour'] < 7)   # Asia
-    ]
-    choices = ['London', 'NY', 'Asia']
-    # Uwaga: NY nakłada się na London, tutaj prosta kategoryzacja
-    df['Session'] = np.select(conditions, choices, default='Other')
-    
-    return df, hurst
 
-def get_volume_profile(df):
-    """Pionowy profil wolumenu."""
-    try:
-        price_hist, bin_edges = np.histogram(df['Close'], bins=50, weights=df['Volume'])
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        poc_idx = np.argmax(price_hist)
-        return price_hist, bin_centers, bin_centers[poc_idx]
-    except: return [], [], 0
+    return df, current_vwap, std_dev, z_score, hurst
 
 # --- 3. DASHBOARD LAYOUT ---
 
-# SIDEBAR
 with st.sidebar:
-    st.markdown("### 🦅 BERLIN QUANT")
+    st.markdown("### ⚛️ QUANT CORE")
     ticker = st.text_input("SYMBOL", "EURUSD=X")
-    tf = st.selectbox("TIMEFRAME", ["1m", "5m", "15m", "1h"], index=2)
-    period_map = {"1m":"5d", "5m":"5d", "15m":"1mo", "1h":"3mo"}
+    tf = st.selectbox("TIMEFRAME", ["5m", "15m", "1h"], index=1)
+    period_map = {"5m":"5d", "15m":"1mo", "1h":"3mo"}
 
-# DATA FETCH
 df_raw = get_data(ticker, tf, period_map.get(tf, "1mo"))
-news_data, cal_data = get_intel_data(ticker)
 
 if df_raw is not None:
-    df, hurst = calculate_metrics(df_raw.copy())
+    df, vwap, std, z, hurst = calculate_stats(df_raw.copy())
+    last_price = df['Close'].iloc[-1]
     
-    # --- TOP KPI BAR ---
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    # --- TOP KPI ---
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("EURUSD PRICE", f"{last_price:.5f}", f"{(last_price - df['Close'].iloc[-2]):.5f}")
+    c2.metric("FAIR VALUE (VWAP)", f"{vwap:.5f}", f"Dist: {(last_price-vwap)*10000:.1f} pips")
+    c3.metric("STATISTICAL Z-SCORE", f"{z:.2f}σ", "EXTREME" if abs(z)>2 else "VALUE ZONE", delta_color="inverse" if abs(z)>2 else "off")
+    c4.metric("MARKET MEMORY (HURST)", f"{hurst:.2f}", "TRENDING" if hurst>0.55 else "MEAN REV")
+    c5.metric("VOLATILITY (STD)", f"{std*10000:.1f} pips", "RANGE RISK")
     
-    last = df['Close'].iloc[-1]
-    chg = last - df['Close'].iloc[-2]
-    z = df['Z_Score'].iloc[-1]
-    
-    c1.metric("EURUSD (BERLIN)", f"{last:.5f}", f"{chg:.5f}")
-    c2.metric("REŻIM (HURST)", f"{hurst:.2f}", "TREND" if hurst>0.55 else "RNG", delta_color="off")
-    c3.metric("Z-SCORE (50)", f"{z:.2f}σ", "EXTREME" if abs(z)>2 else "OK", delta_color="inverse")
-    c4.metric("VOLATILITY", f"{df['Close'].pct_change().std()*100*np.sqrt(252*24):.2f}%", "ANN")
-    
-    # Current Session Logic
-    curr_hour = datetime.now(BERLIN_TZ).hour
-    curr_sess = "ASIA" if (curr_hour>=22 or curr_hour<7) else "LONDON" if (curr_hour>=8 and curr_hour<13) else "LDN/NY" if (curr_hour>=13 and curr_hour<17) else "NY"
-    c5.metric("ACTIVE SESSION", curr_sess, f"{datetime.now(BERLIN_TZ).strftime('%H:%M')}")
-    
-    quant_sig = "LONG" if z < -2 else "SHORT" if z > 2 else "WAIT"
-    c6.metric("QUANT SIGNAL", quant_sig, "MEAN REV" if quant_sig != "WAIT" else "")
-
-    # --- MAIN GRID ---
-    col_main, col_right = st.columns([3, 1])
+    # --- MAIN VISUALIZATION: THE PROBABILITY WELL ---
+    col_main, col_side = st.columns([3, 1])
     
     with col_main:
-        st.markdown(f"<div class='module-header'><span>CHART: {ticker} [{tf}]</span> <span>BERLIN TIMEZONE</span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='module-header'>STATISTICAL MARKET STRUCTURE (NO-CHART VIEW)</div>", unsafe_allow_html=True)
         
-        # OBLICZENIA PROFILU
-        hist, bins, poc = get_volume_profile(df.tail(200))
+        # Generowanie Krzywej Gaussa na bazie danych rynkowych
+        x_axis = np.linspace(df['Low'].min(), df['High'].max(), 500)
+        # Używamy VWAP jako średniej i STD z danych
+        gaussian_curve = norm.pdf(x_axis, vwap, std)
         
-        # PLOTLY SUBPLOTS (Wykres + Profil + CVD)
-        fig = make_subplots(
-            rows=2, cols=2, 
-            shared_xaxes=True, shared_yaxes=True,
-            column_widths=[0.85, 0.15], 
-            row_heights=[0.75, 0.25],
-            horizontal_spacing=0.01, vertical_spacing=0.02,
-            specs=[[{}, {}], [{"colspan": 2}, None]]
+        # Normalizacja krzywej do wizualizacji (żeby była ładnie wysoka)
+        gaussian_curve = gaussian_curve / gaussian_curve.max()
+
+        fig = go.Figure()
+        
+        # 1. TŁO - Krzywa Rozkładu Prawdopodobieństwa (Gradient)
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=gaussian_curve,
+            mode='lines', fill='tozeroy',
+            line=dict(color='rgba(0, 188, 212, 0.2)', width=2),
+            fillcolor='rgba(0, 188, 212, 0.1)',
+            name='Probability Density'
+        ))
+        
+        # 2. STREFY STATYSTYCZNE (Pionowe linie)
+        # VWAP (Środek)
+        fig.add_vline(x=vwap, line_width=2, line_dash="dash", line_color="#00bcd4", annotation_text="VWAP (Fair Value)", annotation_position="top right")
+        
+        # +1 / -1 STD (Value Area)
+        fig.add_vline(x=vwap + std, line_width=1, line_color="rgba(0,255,0,0.3)", annotation_text="+1σ")
+        fig.add_vline(x=vwap - std, line_width=1, line_color="rgba(0,255,0,0.3)", annotation_text="-1σ")
+        
+        # +2 / -2 STD (Extreme Zones)
+        fig.add_vline(x=vwap + 2*std, line_width=2, line_color="rgba(255,50,50,0.5)", annotation_text="+2σ (Sell Zone)")
+        fig.add_vline(x=vwap - 2*std, line_width=2, line_color="rgba(255,50,50,0.5)", annotation_text="-2σ (Buy Zone)")
+        
+        # 3. AKTUALNA CENA (Kursor)
+        # Kolor kursora zależy od Z-Score
+        cursor_color = "#ff3333" if z > 2 else "#00ff00" if z < -2 else "#ffffff"
+        
+        fig.add_vline(x=last_price, line_width=4, line_color=cursor_color)
+        # Dodanie punktu na szczycie linii dla efektu "celownika"
+        current_prob = norm.pdf(last_price, vwap, std) / norm.pdf(vwap, vwap, std)
+        fig.add_trace(go.Scatter(
+            x=[last_price], y=[current_prob],
+            mode='markers', marker=dict(color=cursor_color, size=15, line=dict(color='white', width=2)),
+            name='CURRENT PRICE'
+        ))
+
+        # Stylizacja
+        fig.update_layout(
+            template='plotly_dark', height=550,
+            margin=dict(l=0,r=0,t=30,b=0),
+            paper_bgcolor='#0a0a0a', plot_bgcolor='#0a0a0a',
+            xaxis_title="CENA (Oś Wartości)", yaxis_title="Gęstość Prawdopodobieństwa (Płynność)",
+            showlegend=False
         )
+        # Ukrywamy oś Y (liczby nie są istotne, liczy się kształt)
+        fig.update_yaxes(showticklabels=False, showgrid=False)
+        fig.update_xaxes(showgrid=True, gridcolor='#222')
         
-        # 1. Cena
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='OHLC', showlegend=False), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Kalman'], line=dict(color='#ffeb3b', width=1.5), name='Kalman'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#00e5ff', width=1, dash='dot'), name='VWAP'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='gray', width=1), name='Band'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='gray', width=1), fill='tonexty', fillcolor='rgba(255,255,255,0.02)', name='Band'), row=1, col=1)
-        
-        # 2. Profil (Side)
-        fig.add_trace(go.Bar(x=hist, y=bins, orientation='h', marker=dict(color=hist, colorscale='Viridis', opacity=0.4), showlegend=False), row=1, col=2)
-        fig.add_hline(y=poc, line_dash="dash", line_color="white", row=1, col=1, opacity=0.7, annotation_text="POC")
-        
-        # 3. CVD (Dolny)
-        delta = np.where(df['Close']>=df['Open'], df['Volume'], -df['Volume'])
-        cvd = np.cumsum(delta)
-        fig.add_trace(go.Scatter(x=df.index, y=cvd, fill='tozeroy', line=dict(color='#2196f3', width=1), name='CVD'), row=2, col=1)
-        
-        fig.update_layout(template='plotly_dark', height=550, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, paper_bgcolor='#000', plot_bgcolor='#111')
-        fig.update_xaxes(visible=False, row=1, col=2); fig.update_yaxes(visible=False, row=1, col=2); fig.update_yaxes(side="right", row=1, col=1)
         st.plotly_chart(fig, use_container_width=True)
-
-    with col_right:
-        # PRAWY PANEL (Liquidity & Heatmap)
-        st.markdown(f"<div class='module-header'><span>LIQUIDITY & SEASONALITY</span></div>", unsafe_allow_html=True)
         
-        tab1, tab2 = st.tabs(["LIQUIDITY", "HEATMAP"])
-        
-        with tab1:
-            # Wykres sesji
-            sess_vol = df.groupby('Session')['Volume'].mean()
-            fig_sess = go.Figure(go.Bar(
-                x=sess_vol.index, y=sess_vol.values, 
-                marker_color=['#9c27b0', '#2196f3', '#ff9800', '#4caf50'] # Kolory dla Asia, London, NY, Other
-            ))
-            fig_sess.update_layout(template='plotly_dark', height=200, margin=dict(l=0,r=0,t=0,b=0), title="Avg Vol by Session", paper_bgcolor='#000')
-            st.plotly_chart(fig_sess, use_container_width=True)
-            
-            st.info(f"Obecna sesja: **{curr_sess}**")
-            
-        with tab2:
-            # FIX HEATMAP (Pivot Table zamiast unstack)
-            try:
-                if tf in ['15m', '1h']:
-                    df['Day'] = df.index.day_name()
-                    # Pivot table jest bezpieczniejsza niż unstack
-                    pivot = pd.pivot_table(df, values='Close', index='Day', columns='Hour', aggfunc=lambda x: (x.iloc[-1]/x.iloc[0])-1)
-                    # Sortowanie dni
-                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-                    pivot = pivot.reindex(days)
-                    
-                    fig_heat = go.Figure(data=go.Heatmap(
-                        z=pivot.values, x=pivot.columns, y=pivot.index,
-                        colorscale='RdBu', zmid=0, showscale=False
-                    ))
-                    fig_heat.update_layout(height=200, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor='#000')
-                    st.plotly_chart(fig_heat, use_container_width=True)
-                else:
-                    st.caption("Wybierz M15/H1 dla mapy.")
-            except Exception as e:
-                st.error("Zbieranie danych...")
+        # Interpretacja pod wizualizacją
+        if abs(z) < 1:
+            st.info("ℹ️ RYNEK W RÓWNOWADZE. Cena blisko VWAP. Brak przewagi statystycznej.")
+        elif z > 2:
+            st.error("🚨 EKSTREMALNE WYKUPIENIE (>2σ). Prawdopodobieństwo powrotu do środka jest wysokie.")
+        elif z < -2:
+            st.success("🚨 EKSTREMALNE WYPRZEDANIE (<-2σ). Prawdopodobieństwo odbicia jest wysokie.")
+        else:
+            st.warning("⚠️ Cena w strefie ruchu (między 1σ a 2σ). Obserwuj Hurst Exponent dla kierunku.")
 
-    # --- BOTTOM DOCK (NEWS & CALENDAR) ---
-    st.markdown("---")
-    c_news, c_cal = st.columns(2)
-    
-    with c_news:
-        st.markdown(f"<div class='module-header'><span>NEWS FEED (BERLIN)</span></div>", unsafe_allow_html=True)
-        if news_data:
-            news_items = []
-            for n in news_data:
-                ts = datetime.fromtimestamp(n.get('providerPublishTime', 0)).strftime('%H:%M')
-                news_items.append({"TIME": ts, "HEADLINE": n.get('title'), "SOURCE": n.get('publisher')})
-            st.dataframe(pd.DataFrame(news_items), hide_index=True, use_container_width=True)
-        else:
-            st.caption("Brak newsów.")
-            
-    with c_cal:
-        st.markdown(f"<div class='module-header'><span>ECONOMIC CALENDAR</span></div>", unsafe_allow_html=True)
-        if isinstance(cal_data, dict) and cal_data:
-            st.json(cal_data)
-        elif hasattr(cal_data, 'empty') and not cal_data.empty:
-            st.dataframe(cal_data, use_container_width=True)
-        else:
-            st.info("Brak danych kalendarza w Yahoo Finance (Limitation). Użyj zewnętrznego źródła dla danych makro.")
+    with col_side:
+        st.markdown(f"<div class='module-header'>CONTEXT & LIQUIDITY</div>", unsafe_allow_html=True)
+        
+        # Tu zostawiamy klasyczny Volume Profile jako uzupełnienie
+        hist, bin_edges = np.histogram(df['Close'], bins=70, weights=df['Volume'])
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        colors = ['#00bcd4' if p >= vwap else '#e91e63' for p in bin_centers]
+        
+        fig_vp = go.Figure(go.Bar(
+            x=hist, y=bin_centers, orientation='h',
+            marker=dict(color=colors, opacity=0.5), showlegend=False
+        ))
+        fig_vp.add_hline(y=last_price, line_color="white", line_width=2)
+        fig_vp.update_layout(
+            template='plotly_dark', height=550, margin=dict(l=0,r=0,t=0,b=0),
+            paper_bgcolor='#0a0a0a', plot_bgcolor='#0a0a0a',
+            xaxis_visible=False, yaxis_title="Cena"
+        )
+        st.plotly_chart(fig_vp, use_container_width=True)
 
 else:
-    st.error("Błąd pobierania danych. Sprawdź symbol.")
+    st.error("Oczekiwanie na dane...")
