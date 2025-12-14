@@ -115,11 +115,10 @@ def monte_carlo_simulation(df, horizon=20, simulations=200):
     
     return future_dates, mean_path, upper_95, lower_05
 
-def generate_ai_narrative(df):
+def generate_ai_narrative(df, correlation_info=None):
     last = df.iloc[-1]
     z_score = last['Z_Score']
     eff = last['Efficiency_Ratio']
-    rsi = 50 # Placeholder, można dodać obliczenie RSI
     
     report = []
     
@@ -137,23 +136,35 @@ def generate_ai_narrative(df):
         report.append("INSTITUTIONAL BIAS: BULLISH (Price > VWAP).")
     else:
         report.append("INSTITUTIONAL BIAS: BEARISH (Price < VWAP).")
+
+    # 4. Correlation Insight
+    if correlation_info:
+        report.append(f"INTER-MARKET LINK: Correlation is {correlation_info:.2f}. " + 
+                      ("Strong Coupling." if abs(correlation_info) > 0.7 else "Decoupled/Divergent."))
         
     return "\n".join(report)
 
 # --- 3. LOADER I HELPERY ---
 
 def smart_data_loader(uploaded_file):
+    if uploaded_file is None: return None
     try:
         uploaded_file.seek(0)
-        # Szybka detekcja nagłówka dla MT4
+        # Szybka detekcja nagłówka dla plików typu "EURUSD Historical Data"
         first_line = uploaded_file.readline().decode('utf-8')
         uploaded_file.seek(0)
+        
+        # Jeśli pierwsza linia to tytuł, nagłówek jest w drugiej (index 1)
         header_row = 1 if "Historical Data" in first_line else 0
         
+        # Używamy engine='python' i on_bad_lines='skip' dla bezpieczeństwa
         df = pd.read_csv(uploaded_file, header=header_row, index_col=False, engine='python')
+        
+        # Czyszczenie nazw kolumn
         df.columns = df.columns.str.strip()
         df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
         
+        # Mapowanie nazw
         col_map = {
             'Time': 'Date', 'date': 'Date', 'DATE': 'Date',
             'open': 'Open', 'OPEN': 'Open', 'high': 'High', 'HIGH': 'High',
@@ -161,13 +172,23 @@ def smart_data_loader(uploaded_file):
             'vol': 'Volume', 'VOL': 'Volume', 'volume': 'Volume', 'Tick Volume': 'Volume'
         }
         df = df.rename(columns=col_map)
+        
         if 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
             df = df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
         
+        # Obsługa braku wolumenu (np. dane dzienne)
         if 'Volume' not in df.columns: df['Volume'] = 1000
+        
+        # Wymagane kolumny
+        required = ['Open', 'High', 'Low', 'Close']
+        if not all(c in df.columns for c in required):
+            st.error(f"Błąd formatu pliku. Wymagane kolumny: {required}. Znaleziono: {df.columns.tolist()}")
+            return None
+            
         return df
     except Exception as e:
+        st.error(f"Critical Error loading file: {e}")
         return None
 
 def detect_fvg(df):
@@ -198,28 +219,53 @@ def generate_mock_data():
 
 # SIDEBAR CONTROLS
 with st.sidebar:
-    st.markdown("## ⚡ QUANT FLOW V2.0")
-    uploaded_file = st.file_uploader("📂 Wgraj Dane (CSV)", type=['csv'])
+    st.markdown("## ⚡ QUANT FLOW INST")
     
-    st.markdown("### ⚙️ Engine Layer")
-    show_fvg = st.toggle("Show FVG (Smart Money)", value=True)
-    show_monte = st.toggle("Monte Carlo Simulation", value=True)
-    show_delta = st.toggle("Synthetic Delta", value=True)
+    # 1. Main Nav
+    selected_page = option_menu(
+        menu_title=None,
+        options=["Dashboard", "Correlations", "Chronos", "Deep Lab"],
+        icons=["speedometer2", "intersect", "clock-history", "cpu"],
+        default_index=0,
+        styles={
+            "container": {"padding": "0!important", "background-color": "#0a0a0a"},
+            "icon": {"color": "#00e5ff", "font-size": "14px"}, 
+            "nav-link": {"font-size": "14px", "text-align": "left", "margin": "5px", "--hover-color": "#222"},
+            "nav-link-selected": {"background-color": "#222", "border-left": "3px solid #00e5ff"},
+        }
+    )
     
+    st.markdown("---")
+    
+    # 2. File Uploads
+    st.markdown("### 📂 Data Feeds")
+    uploaded_file = st.file_uploader("Asset A (Main)", type=['csv'], key="main_file")
+    uploaded_ref_file = st.file_uploader("Asset B (Correlation)", type=['csv'], key="ref_file")
+    
+    st.markdown("### ⚙️ Engine Layers")
+    show_fvg = st.checkbox("Show FVG", value=True)
+    show_monte = st.checkbox("Monte Carlo", value=True)
+    show_delta = st.checkbox("Synthetic Delta", value=True)
+    
+    st.markdown("---")
     st.markdown("### 🧠 AI Analyst Log")
     ai_placeholder = st.empty()
 
-# LOAD DATA
+# LOAD DATA (Main Asset)
 if uploaded_file:
     df = smart_data_loader(uploaded_file)
-    src_label = "USER DATA"
+    src_label = uploaded_file.name
 else:
     df = generate_mock_data()
     src_label = "SIMULATION"
 
 if df is None or df.empty:
-    st.error("Błąd danych.")
     st.stop()
+
+# LOAD DATA (Reference Asset for Correlation)
+df_ref = None
+if uploaded_ref_file:
+    df_ref = smart_data_loader(uploaded_ref_file)
 
 # PRZELICZANIE METRYK
 df = calculate_institutional_metrics(df)
@@ -241,22 +287,30 @@ st.markdown("---")
 last_price = df['Close'].iloc[-1]
 chg = (last_price / df['Close'].iloc[-2] - 1) * 100
 vol_z = df['Z_Score'].iloc[-1]
+corr_val = 0
+
+# Obliczanie korelacji jeśli jest drugi plik
+if df_ref is not None:
+    # Merge on Index (Time)
+    merged = pd.merge(df, df_ref, left_index=True, right_index=True, suffixes=('', '_REF'))
+    if not merged.empty:
+        corr_val = merged['Close'].rolling(50).corr(merged['Close_REF']).iloc[-1]
+    else:
+        st.warning("Brak pokrywających się dat między plikami!")
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("ASSET", "EURUSD", src_label)
+k1.metric("ASSET A", src_label[:10], "Primary")
 k2.metric("PRICE", f"{last_price:.5f}", f"{chg:+.2f}%")
-k3.metric("VOLATILITY Z-SCORE", f"{vol_z:.2f}", "Sigma")
-k4.metric("EFFICIENCY", f"{df['Efficiency_Ratio'].iloc[-1]:.2f}", "Fractal Dim")
+k3.metric("VOLATILITY Z", f"{vol_z:.2f}", "Sigma")
+k4.metric("CORRELATION", f"{corr_val:.2f}", "vs Asset B" if df_ref is not None else "No Data")
 
 # GENERATE AI REPORT
-ai_report = generate_ai_narrative(df)
+ai_report = generate_ai_narrative(df, correlation_info=corr_val if df_ref is not None else None)
 ai_placeholder.markdown(f"<div class='ai-terminal'>{ai_report.replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
 
-# --- VISUALIZATION TAB ---
-tabs = option_menu(None, ["Quant Chart", "Chronos Heatmap", "Monte Carlo Lab"], 
-    icons=['graph-up', 'clock', 'activity'], orientation="horizontal")
+# --- VISUALIZATION TABS ---
 
-if tabs == "Quant Chart":
+if selected_page == "Dashboard":
     # 1. MAIN CHART
     fig = go.Figure()
     
@@ -268,22 +322,21 @@ if tabs == "Quant Chart":
     
     # FVG
     if show_fvg:
-        for fvg in fvgs[-20:]:
+        for fvg in fvgs[-30:]:
             color = 'rgba(0, 255, 100, 0.15)' if fvg['type'] == 'bull' else 'rgba(255, 0, 50, 0.15)'
             fig.add_shape(type="rect", x0=fvg['x0'], x1=df.index[-1], y0=fvg['bottom'], y1=fvg['top'], 
                           fillcolor=color, line_width=0)
 
-    # Monte Carlo Fan (Overlay)
+    # Monte Carlo Fan
     if show_monte:
         fd, mean_p, up_95, lo_05 = monte_carlo_simulation(df)
-        # Rysujemy chmurę (Cloud)
         fig.add_trace(go.Scatter(x=fd, y=up_95, mode='lines', line=dict(width=0), showlegend=False))
         fig.add_trace(go.Scatter(x=fd, y=lo_05, mode='lines', line=dict(width=0), fill='tonexty', 
                                  fillcolor='rgba(138, 43, 226, 0.2)', name='Probability Cloud (90%)'))
-        fig.add_trace(go.Scatter(x=fd, y=mean_p, mode='lines', line=dict(color='#d500f9', dash='dot'), name='Mean Path'))
+        fig.add_trace(go.Scatter(x=fd, y=mean_p, mode='lines', line=dict(color='#d500f9', dash='dot'), name='MC Prediction'))
 
     fig.update_layout(height=600, template='plotly_dark', xaxis_rangeslider_visible=False, margin=dict(l=0,r=0),
-                      title="Institutional Price Action & AI Structure")
+                      title="Institutional Price Action")
     st.plotly_chart(fig, use_container_width=True)
     
     # 2. SYNTHETIC DELTA
@@ -291,18 +344,40 @@ if tabs == "Quant Chart":
         fig_delta = go.Figure()
         colors = ['#00e5ff' if x >= 0 else '#ff1744' for x in df['Delta_Est']]
         fig_delta.add_trace(go.Bar(x=df.index, y=df['Delta_Est'], marker_color=colors, name='Delta Pressure'))
-        fig_delta.update_layout(height=200, template='plotly_dark', margin=dict(t=0, b=0), title="Synthetic Delta Pressure (Buy/Sell Flow)")
+        fig_delta.update_layout(height=200, template='plotly_dark', margin=dict(t=0, b=0), title="Synthetic Delta Pressure")
         st.plotly_chart(fig_delta, use_container_width=True)
 
-elif tabs == "Chronos Heatmap":
+elif selected_page == "Correlations":
+    st.markdown("<div class='section-header'>INTER-MARKET CORRELATION LAB</div>", unsafe_allow_html=True)
+    
+    if df_ref is not None:
+        merged = pd.merge(df, df_ref, left_index=True, right_index=True, suffixes=('', '_REF'))
+        
+        # Normalize for visualization
+        norm_main = (merged['Close'] - merged['Close'].min()) / (merged['Close'].max() - merged['Close'].min())
+        norm_ref = (merged['Close_REF'] - merged['Close_REF'].min()) / (merged['Close_REF'].max() - merged['Close_REF'].min())
+        
+        fig_corr = go.Figure()
+        fig_corr.add_trace(go.Scatter(x=merged.index, y=norm_main, name=f"Asset A ({src_label})", line=dict(color='#00e5ff')))
+        fig_corr.add_trace(go.Scatter(x=merged.index, y=norm_ref, name="Asset B (Ref)", line=dict(color='#ffab00', dash='dot')))
+        fig_corr.update_layout(height=500, template='plotly_dark', title="Normalized Price Comparison")
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        # Rolling Correlation Chart
+        rolling_corr = merged['Close'].rolling(50).corr(merged['Close_REF'])
+        fig_roll = px.area(x=merged.index, y=rolling_corr, title="50-Period Rolling Correlation Coefficient")
+        fig_roll.update_layout(height=300, template='plotly_dark', yaxis_range=[-1, 1])
+        st.plotly_chart(fig_roll, use_container_width=True)
+    else:
+        st.info("ℹ️ Wgraj drugi plik CSV w panelu bocznym (Asset B), aby analizować korelacje.")
+
+elif selected_page == "Chronos":
     st.markdown("<div class='section-header'>TIME & VOLATILITY STATISTICS</div>", unsafe_allow_html=True)
     
-    # Przygotowanie danych do Heatmapy
     df['Day'] = df.index.day_name()
     df['Hour'] = df.index.hour
-    df['Range'] = df['High'] - df['Low'] # Zmienność
+    df['Range'] = df['High'] - df['Low']
     
-    # Pivot Table: Dzień vs Godzina -> Średnia Zmienność
     heatmap_data = df.pivot_table(index='Day', columns='Hour', values='Range', aggfunc='mean')
     days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
     heatmap_data = heatmap_data.reindex(days_order)
@@ -311,16 +386,16 @@ elif tabs == "Chronos Heatmap":
                        color_continuous_scale='Magma', aspect='auto')
     fig_hm.update_layout(height=600, template='plotly_dark', title="Market Heartbeat: Kiedy handlować?")
     st.plotly_chart(fig_hm, use_container_width=True)
-    st.info("💡 Jaśniejsze pola oznaczają statystycznie wyższą zmienność. Ciemne pola to czas konsolidacji (nie handluj).")
 
-elif tabs == "Monte Carlo Lab":
-    st.markdown("<div class='section-header'>PROBABILISTIC FUTURE MODELING</div>", unsafe_allow_html=True)
+elif selected_page == "Deep Lab":
+    st.markdown("<div class='section-header'>MONTE CARLO SIMULATION LAB</div>", unsafe_allow_html=True)
     fd, mean_p, up_95, lo_05 = monte_carlo_simulation(df, simulations=500)
     
     fig_mc = go.Figure()
-    # Symulacja 50 losowych ścieżek dla tła
     last_price = df['Close'].iloc[-1]
     last_vol = df['LogRet'].iloc[-50:].std()
+    
+    # 50 losowych ścieżek
     for _ in range(50):
         path = [last_price]
         for _ in range(len(fd)-1):
@@ -328,5 +403,5 @@ elif tabs == "Monte Carlo Lab":
         fig_mc.add_trace(go.Scatter(x=fd, y=path, mode='lines', line=dict(color='rgba(255,255,255,0.05)', width=1), showlegend=False))
         
     fig_mc.add_trace(go.Scatter(x=fd, y=mean_p, line=dict(color='#00e5ff', width=3), name='Expected Path'))
-    fig_mc.update_layout(height=500, template='plotly_dark', title="Monte Carlo: 500 Simulations")
+    fig_mc.update_layout(height=500, template='plotly_dark', title="Monte Carlo: 500 Future Paths")
     st.plotly_chart(fig_mc, use_container_width=True)
