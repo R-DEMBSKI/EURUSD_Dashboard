@@ -1,6 +1,3 @@
-# @title 🏛️ QUANT LAB v26.0: THE CLOUD ARCHITECT (Streamlit App)
-# PRZENIESIENIE: Lokalny Skrypt -> Profesjonalna Aplikacja Webowa
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
