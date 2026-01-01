@@ -8,10 +8,10 @@ from sklearn.mixture import GaussianMixture
 from scipy.stats import t
 import warnings
 
-# Wyciszenie ostrzeżeń dla czystości logów
+# Wyciszenie ostrzeżeń dla czystości interfejsu
 warnings.filterwarnings("ignore")
 
-# --- 1. KONFIGURACJA STRONY (Musi być na samej górze) ---
+# --- 1. KONFIGURACJA STRONY (Musi być pierwsza) ---
 st.set_page_config(
     page_title="QUANT LAB | Institutional Terminal",
     page_icon="🏛️",
@@ -19,15 +19,31 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS dla "Bloomberg/Institutional Feel"
+# Custom CSS - Bloomberg Terminal Aesthetic
 st.markdown("""
 <style>
+    /* Główne tło */
     .stApp { background-color: #0e1117; }
-    /* Stylizacja metryk HUD */
-    div[data-testid="stMetricValue"] { font-size: 24px; color: #00ff00; font-family: 'Courier New', monospace; }
-    div[data-testid="stMetricLabel"] { font-size: 14px; color: #888; }
+    
+    /* Metryki (HUD) */
+    div[data-testid="stMetricValue"] { 
+        font-size: 28px; 
+        color: #00ff00; 
+        font-family: 'Courier New', monospace; 
+        font-weight: bold;
+    }
+    div[data-testid="stMetricLabel"] { 
+        font-size: 14px; 
+        color: #888; 
+        font-weight: normal;
+    }
+    
     /* Pasek postępu - kolor */
     .stProgress > div > div > div > div { background-color: #00ff00; }
+    
+    /* Ukrycie domyślnych elementów Streamlit */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,36 +52,48 @@ CONFIG = {
     'TARGET': 'EURUSD=X',
     'MACRO': {'US10Y': '^TNX', 'VIX': '^VIX', 'SPX': '^GSPC', 'GOLD': 'GC=F'},
     'LOOKBACK': '2y',
-    # Parametry modelu (można stroić przez Optuna offline)
-    'BEST_PARAMS': {'eta': 0.05, 'max_depth': 5, 'objective': 'binary:logistic', 'eval_metric': 'logloss'}
+    # Parametry modelu (zoptymalizowane pod FX)
+    'BEST_PARAMS': {
+        'eta': 0.05, 
+        'max_depth': 5, 
+        'objective': 'binary:logistic', 
+        'eval_metric': 'logloss'
+    }
 }
 
 @st.cache_data(ttl=3600)
 def load_data(ticker):
-    """Pobiera dane i obsługuje MultiIndex z yfinance"""
+    """Pobiera dane i obsługuje MultiIndex z yfinance (Robust Data Loader)"""
     tickers = [ticker] + list(CONFIG['MACRO'].values())
     try:
         df = yf.download(tickers, period=CONFIG['LOOKBACK'], interval="1d", progress=False)
     except Exception as e:
-        st.error(f"Error downloading data: {e}")
+        st.error(f"Critical Error downloading data: {e}")
         return pd.DataFrame()
     
-    # Obsługa struktury danych (Flattening)
+    # Obsługa struktury danych (Flattening MultiIndex)
     data = pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         try:
+            # Próba pobrania głównego tickera
             data['Close'] = df['Close'][ticker]
             data['High'] = df['High'][ticker]
             data['Low'] = df['Low'][ticker]
             data['Open'] = df['Open'][ticker]
+            
+            # Pobieranie danych makro
             for key, val in CONFIG['MACRO'].items():
                 if val in df['Close'].columns:
                     data[key] = df['Close'][val]
         except KeyError:
-             st.error("Data mapping error. Check tickers or API.")
-             return pd.DataFrame()
+             # Fallback dla pojedynczego tickera (gdyby makro nie weszło)
+             if ticker in df['Close'].columns:
+                 data['Close'] = df['Close'][ticker]
+             else:
+                 # Ostatnia deska ratunku - płaska struktura
+                 data = df 
     else:
-        # Fallback dla prostej struktury
+        # Fallback dla prostej struktury (rzadkie w nowym yfinance)
         data = df
         
     data = data.ffill().dropna()
@@ -147,9 +175,10 @@ def run_quant_engine(df):
 # --- 3. UI & SIDEBAR ---
 st.sidebar.header("🎛️ Control Panel")
 symbol = st.sidebar.text_input("Asset", "EURUSD=X")
+
 if st.sidebar.button("🚀 RUN ANALYSIS", type="primary"):
     
-    with st.spinner("Processing Quantum Data..."):
+    with st.spinner("Initializing Quantum Core..."):
         data = load_data(symbol)
         
         if not data.empty:
@@ -161,12 +190,13 @@ if st.sidebar.button("🚀 RUN ANALYSIS", type="primary"):
                 # Logika Sygnału
                 signal = "WAIT"
                 delta_color = "off"
+                prob_val = float(res['prob_up']) # Fix typu danych
                 
                 # Progi decyzyjne
-                if res['prob_up'] > 0.60: 
+                if prob_val > 0.60: 
                     signal = "STRONG BUY"
                     delta_color = "normal"
-                elif res['prob_up'] < 0.40: 
+                elif prob_val < 0.40: 
                     signal = "STRONG SELL"
                     delta_color = "inverse"
                 else:
@@ -175,15 +205,15 @@ if st.sidebar.button("🚀 RUN ANALYSIS", type="primary"):
                 # Wyświetlanie Metryk (HUD)
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: st.metric("PRICE", f"{res['price']:.5f}")
-                with c2: st.metric("SIGNAL", signal, delta=f"{res['prob_up']:.1%}", delta_color=delta_color)
+                with c2: st.metric("SIGNAL", signal, delta=f"{prob_val:.1%}", delta_color=delta_color)
                 with c3: st.metric("REGIME", res['regime'])
                 with c4: st.metric("RANGE (MC)", f"{(res['resistance']-res['support'])*10000:.0f} pips")
 
                 # --- 5. INTERACTIVE CHART (PLOTLY) ---
                 fig = go.Figure()
 
-                # Świece
-                plot_df = res['df'].tail(120) # Pokaż ostatnie 120 dni
+                # Świece (Ostatnie 100 dni)
+                plot_df = res['df'].tail(100) 
                 fig.add_trace(go.Candlestick(
                     x=plot_df.index,
                     open=plot_df['Open'], high=plot_df['High'],
@@ -191,11 +221,12 @@ if st.sidebar.button("🚀 RUN ANALYSIS", type="primary"):
                     name='Price'
                 ))
 
-                # Monte Carlo Cones (Projekcja)
+                # Monte Carlo Cones (Projekcja w przyszłość)
                 last_date = plot_df.index[-1]
+                # Symulacja daty na jutro (dla celów wizualizacji)
                 next_date = last_date + pd.Timedelta(days=1)
                 
-                # Linie wsparcia i oporu
+                # Linie wsparcia i oporu (Kropkowane linie projekcji)
                 fig.add_trace(go.Scatter(
                     x=[last_date, next_date], y=[res['price'], res['resistance']],
                     mode='lines', line=dict(color='red', dash='dot', width=2), name='Resistance (95%)'
@@ -211,32 +242,35 @@ if st.sidebar.button("🚀 RUN ANALYSIS", type="primary"):
                     height=600, 
                     template='plotly_dark',
                     xaxis_rangeslider_visible=False,
-                    margin=dict(l=20, r=20, t=50, b=20)
+                    margin=dict(l=20, r=20, t=50, b=20),
+                    font=dict(family="Courier New, monospace")
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # --- 6. DETAILS TABS ---
-                t1, t2 = st.tabs(["📊 Macro & Risk", "🧠 AI Diagnostics"])
+                t1, t2 = st.tabs(["📊 Risk Profile", "🧠 AI Diagnostics"])
                 
                 with t1:
                     c_vol, c_var = st.columns(2)
                     c_vol.info(f"Annualized Volatility: **{res['vol_ann']*100:.2f}%**")
-                    c_var.warning("Macro Correlations coming in v29 (Data Feed Required)")
+                    c_var.success(f"Support Level: **{res['support']:.5f}**")
+                    c_var.error(f"Resistance Level: **{res['resistance']:.5f}**")
                     
                 with t2:
                     col1, col2 = st.columns(2)
-                    # FIX: Rzutowanie na float, aby uniknąć błędu StreamlitAPIException
-                    prob_val = float(res['prob_up'])
+                    # FIX: Użycie rzutowanej wartości float
                     col1.progress(prob_val, text=f"Bullish Probability: {prob_val:.1%}")
                     
-                    col2.markdown(f"""
-                    **AI Forecast Levels:**
-                    * 🔴 Resistance: `{res['resistance']:.5f}`
-                    * 🟢 Support: `{res['support']:.5f}`
-                    """)
+                    if prob_val > 0.5:
+                        bias_text = "Positive bias detected. Momentum supports long positions."
+                    else:
+                        bias_text = "Negative bias detected. Momentum supports short positions."
+                    
+                    col2.markdown(f"**AI Insight:** {bias_text}")
+
             else:
-                st.error("Not enough data to calculate metrics.")
+                st.error("Not enough data to calculate metrics. Market might be closed or ticker invalid.")
         else:
             st.error("Failed to load data. Check ticker symbol.")
 else:
