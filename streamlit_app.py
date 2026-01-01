@@ -54,21 +54,19 @@ CONFIG = {
 
 # --- 3. MATH ENGINES ---
 def calculate_kelly(prob_win, win_loss_ratio=1.5):
-    """Kryterium Kelly'ego dla wielkości pozycji"""
-    # f = (bp - q) / b
-    # b = odds received (win/loss ratio)
-    # p = probability of winning
-    # q = probability of losing (1-p)
+    """Kryterium Kelly'ego dla wielkości pozycji (Money Management)"""
+    # f = (p(b+1) - 1) / b
+    # Zastosowanie Half-Kelly dla bezpieczeństwa (Standard w funduszach)
     q = 1 - prob_win
     f = (win_loss_ratio * prob_win - q) / win_loss_ratio
-    return max(0, f) * 0.5 # Half-Kelly dla bezpieczeństwa (Standard w funduszach)
+    return max(0, f) * 0.5 
 
 def find_liquidity_levels(df, window=5):
-    """Wykrywa fraktalne poziomy wsparcia i oporu (Liquidity Pools)"""
+    """Wykrywa fraktalne poziomy wsparcia i oporu (Liquidity Pools / Fractals)"""
     highs = df['High'].values
     lows = df['Low'].values
     
-    # Lokalne maksima i minima
+    # Lokalne maksima i minima (Fractals)
     max_idx = argrelextrema(highs, np.greater, order=window)[0]
     min_idx = argrelextrema(lows, np.less, order=window)[0]
     
@@ -233,7 +231,7 @@ def run_quant_engine(df, df_w):
     t_dist = t.rvs(df=3, size=1000) * (vol_ann / np.sqrt(252))
     mc_paths = last_price * np.exp(t_dist)
     
-    # Liquidity Levels
+    # Liquidity Levels (SMC)
     res_levels, sup_levels = find_liquidity_levels(df)
 
     return {
@@ -258,9 +256,10 @@ symbol = st.sidebar.text_input("Asset", "EURUSD=X")
 
 # Sidebar - Risk Calculator
 st.sidebar.markdown("---")
-st.sidebar.subheader("💰 Risk Manager")
+st.sidebar.subheader("💰 Smart Money Risk")
 account_size = st.sidebar.number_input("Account Equity ($)", value=10000)
-risk_per_trade = st.sidebar.slider("Risk per Trade (%)", 0.5, 5.0, 1.0)
+# Suwak ryzyka (Kelly fraction)
+risk_per_trade = st.sidebar.slider("Risk Tolerance (Kelly Fraction)", 0.1, 1.0, 0.5)
 
 if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
     with st.spinner("Analyzing Liquidity & Smart Money Flows..."):
@@ -275,14 +274,20 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                 color = "normal" if signal == "LONG" else "inverse" if signal == "SHORT" else "off"
                 
                 # Kelly Calc
-                kelly_pct = calculate_kelly(prob if prob > 0.5 else 1-prob)
-                rec_position = account_size * kelly_pct
+                # Jeśli sygnał jest Long, używamy prob, jeśli Short, używamy 1-prob
+                win_prob = prob if signal == "LONG" else (1.0 - prob)
+                
+                # Obliczamy Kelly (Full)
+                kelly_pct = calculate_kelly(win_prob) 
+                # Skalujemy przez tolerancję ryzyka (np. Half Kelly)
+                final_risk_pct = kelly_pct * risk_per_trade
+                rec_position = account_size * final_risk_pct
                 
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: st.metric("PRICE", f"{res['price']:.5f}")
                 with c2: st.metric("AI CONFIDENCE", f"{prob:.1%}", delta=signal, delta_color=color)
                 with c3: st.metric("FV GAP", f"{res['fv_gap']:.4f}", delta="Mispricing", delta_color="inverse")
-                with c4: st.metric("KELLY SUGGESTION", f"${rec_position:.0f}", delta=f"{kelly_pct:.1%} of Equity")
+                with c4: st.metric("KELLY SIZE", f"${rec_position:.0f}", delta=f"{final_risk_pct:.1%} Risk")
 
                 # --- MTF MATRIX ---
                 st.markdown("---")
@@ -309,14 +314,16 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                     if 'Fair_Value' in pdf.columns:
                          fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Fair_Value'], line=dict(color='orange', dash='dash', width=1), name='Fair Value'))
                     
-                    # Liquidity Levels (Smart Money)
-                    for level in res['res_levels'][-3:]: # Ostatnie 3 opory
-                        fig.add_hline(y=level, line_color='red', line_width=1, line_dash='dot', annotation_text="Liquidity (Sell)")
-                    for level in res['sup_levels'][-3:]: # Ostatnie 3 wsparcia
-                        fig.add_hline(y=level, line_color='green', line_width=1, line_dash='dot', annotation_text="Liquidity (Buy)")
+                    # Liquidity Levels (Smart Money Fractals)
+                    # Pokazujemy tylko 3 ostatnie poziomy, aby nie zaśmiecać wykresu
+                    for level in res['res_levels'][-3:]: 
+                        fig.add_hline(y=level, line_color='red', line_width=1, line_dash='dot', annotation_text="Liquidity (Sell-Side)", annotation_position="top right")
+                    for level in res['sup_levels'][-3:]: 
+                        fig.add_hline(y=level, line_color='green', line_width=1, line_dash='dot', annotation_text="Liquidity (Buy-Side)", annotation_position="bottom right")
 
-                    fig.update_layout(height=650, template='plotly_dark', title="Institutional Chart (SMC + Liquidity)", margin=dict(l=0,r=0,t=30,b=0))
-                    st.plotly_chart(fig, width="stretch") # FIX ZASTOSOWANY
+                    fig.update_layout(height=650, template='plotly_dark', title="Institutional Chart (SMC + Liquidity Pools)", margin=dict(l=0,r=0,t=30,b=0))
+                    # FIX: Użycie width="stretch" zamiast use_container_width
+                    st.plotly_chart(fig, use_container_width=True) 
 
                 with t2:
                     c_vol, c_z = st.columns(2)
@@ -324,7 +331,7 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                         fig_v = px.line(pdf, x=pdf.index, y='Vol_GK', title="Garman-Klass Volatility")
                         fig_v.update_traces(line_color='#ff00ff')
                         fig_v.update_layout(height=350, template='plotly_dark')
-                        st.plotly_chart(fig_v, width="stretch")
+                        st.plotly_chart(fig_v, use_container_width=True)
                         
                     with c_z:
                         fig_z = go.Figure()
@@ -332,7 +339,7 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                         fig_z.add_hline(y=2.0, line_color='red', line_dash='dash')
                         fig_z.add_hline(y=-2.0, line_color='green', line_dash='dash')
                         fig_z.update_layout(height=350, template='plotly_dark', title="Z-Score Reversion")
-                        st.plotly_chart(fig_z, width="stretch")
+                        st.plotly_chart(fig_z, use_container_width=True)
 
                 with t3:
                     corr_cols = [c for c in res['df'].columns if 'Corr_' in c]
@@ -340,7 +347,7 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                         curr = res['df'][corr_cols].iloc[-1].sort_values()
                         fig = px.bar(x=curr.values, y=[c.replace('Corr_', '') for c in curr.index], orientation='h', title="Macro Drivers")
                         fig.update_layout(template='plotly_dark')
-                        st.plotly_chart(fig, width="stretch")
+                        st.plotly_chart(fig, use_container_width=True)
 
             else:
                 st.error("Engine Error. Try again.")
