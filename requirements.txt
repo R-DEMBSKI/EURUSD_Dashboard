@@ -6,4 +6,5 @@ numpy
 scikit-learn
 scipy
 xgboost
-streamlit-option-menu
+ta
+statsmodels
