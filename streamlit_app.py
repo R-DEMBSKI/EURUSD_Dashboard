@@ -7,12 +7,13 @@ import plotly.graph_objects as go
 import plotly.express as px
 from sklearn.linear_model import LinearRegression
 from scipy.stats import t
+from scipy.signal import argrelextrema
 import warnings
 import time
 
 # --- 1. KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="QUANT LAB | Institutional MTF Terminal",
+    page_title="QUANT LAB | Smart Money Terminal",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -31,7 +32,7 @@ st.markdown("""
     }
     div[data-testid="stMetricLabel"] { font-size: 13px; color: #888; }
     
-    /* Tables & Tabs */
+    /* Tabs */
     .stTabs [aria-selected="true"] {
         background-color: #1e2130; color: #00ff00; border-bottom: 2px solid #00ff00;
     }
@@ -48,13 +49,41 @@ CONFIG = {
     'MACRO': {
         'US10Y': '^TNX', 'DXY': 'DX-Y.NYB', 'VIX': '^VIX', 'SPX': '^GSPC', 'GOLD': 'GC=F'
     },
-    'LOOKBACK': '730d', # 2 lata historii dla stabilności
+    'LOOKBACK': '730d', 
 }
 
 # --- 3. MATH ENGINES ---
+def calculate_kelly(prob_win, win_loss_ratio=1.5):
+    """Kryterium Kelly'ego dla wielkości pozycji"""
+    # f = (bp - q) / b
+    # b = odds received (win/loss ratio)
+    # p = probability of winning
+    # q = probability of losing (1-p)
+    q = 1 - prob_win
+    f = (win_loss_ratio * prob_win - q) / win_loss_ratio
+    return max(0, f) * 0.5 # Half-Kelly dla bezpieczeństwa (Standard w funduszach)
+
+def find_liquidity_levels(df, window=5):
+    """Wykrywa fraktalne poziomy wsparcia i oporu (Liquidity Pools)"""
+    highs = df['High'].values
+    lows = df['Low'].values
+    
+    # Lokalne maksima i minima
+    max_idx = argrelextrema(highs, np.greater, order=window)[0]
+    min_idx = argrelextrema(lows, np.less, order=window)[0]
+    
+    resistance_levels = highs[max_idx]
+    support_levels = lows[min_idx]
+    
+    # Zwracamy tylko poziomy blisko obecnej ceny (ostatnie 3 miesiące)
+    recent_limit = len(df) - 60
+    
+    rel_res = [x for i, x in enumerate(resistance_levels) if max_idx[i] > recent_limit]
+    rel_sup = [x for i, x in enumerate(support_levels) if min_idx[i] > recent_limit]
+    
+    return rel_res, rel_sup
+
 def garman_klass_volatility(df):
-    """Zaawansowany estymator zmienności (High/Low/Open/Close)"""
-    # Unikamy zer i ujemnych wartości w logarytmach
     try:
         log_hl = np.log(df['High'] / df['Low'])**2
         log_co = np.log(df['Close'] / df['Open'])**2
@@ -63,7 +92,6 @@ def garman_klass_volatility(df):
         return df['Close'].pct_change().rolling(20).std()
 
 def calculate_hurst(series):
-    """Oblicza Hurst Exponent (Mean Rev < 0.5 < Trending)"""
     try:
         lags = range(2, 20)
         tau = [np.sqrt(np.std(np.subtract(series[lag:], series[:-lag]))) for lag in lags]
@@ -73,7 +101,6 @@ def calculate_hurst(series):
         return 0.5
 
 def kalman_filter(data, Q=1e-5, R=0.01):
-    """Filtr Kalmana - 'Prawdziwa' cena instrumentu"""
     n_iter = len(data)
     sz = (n_iter,)
     xhat = np.zeros(sz)      
@@ -91,12 +118,12 @@ def kalman_filter(data, Q=1e-5, R=0.01):
         P[k] = (1 - K[k]) * Pminus[k]
     return xhat
 
-# --- 4. DATA LOADER (MTF ENABLED) ---
+# --- 4. DATA LOADER ---
 @st.cache_data(ttl=3600)
 def load_data(ticker):
     tickers = [ticker] + list(CONFIG['MACRO'].values())
     
-    # 1. Pobranie danych DZIENNYCH (Daily) - Próba retry
+    # Retry mechanism
     df_d = pd.DataFrame()
     for _ in range(3):
         try:
@@ -107,35 +134,31 @@ def load_data(ticker):
         except:
             time.sleep(1)
             
-    # 2. Pobranie danych TYGODNIOWYCH (Weekly) - dla MTF Context
+    # Weekly Data for MTF
     df_w = pd.DataFrame()
     try:
         df_w = yf.download(ticker, period="2y", interval="1wk", progress=False)
     except:
         pass
 
-    # Cleaning Daily
+    # Cleaning
     clean_d = pd.DataFrame()
     if not df_d.empty:
         try:
-            # Obsługa złożonego MultiIndex z yfinance
             if isinstance(df_d.columns, pd.MultiIndex):
-                # Price Data
                 if ticker in df_d['Close'].columns:
                     clean_d['Close'] = df_d['Close'][ticker]
                     clean_d['High'] = df_d['High'][ticker]
                     clean_d['Low'] = df_d['Low'][ticker]
                     clean_d['Open'] = df_d['Open'][ticker]
-                # Macro Data
                 for key, val in CONFIG['MACRO'].items():
                     if val in df_d['Close'].columns:
                         clean_d[key] = df_d['Close'][val]
             else:
-                clean_d = df_d # Prosta struktura
+                clean_d = df_d
         except:
             return None, None
             
-    # Cleaning Weekly
     clean_w = pd.DataFrame()
     if not df_w.empty:
         try:
@@ -153,84 +176,65 @@ def load_data(ticker):
 def run_quant_engine(df, df_w):
     if len(df) < 50: return None
     
-    # --- A. Technicals ---
+    # Technicals
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-    
-    # Garman-Klass Volatility (Institutional Grade)
     df['Vol_GK'] = garman_klass_volatility(df)
-    
-    # Kalman
     df['Kalman'] = kalman_filter(df['Close'])
-    
-    # Hurst
     hurst_val = calculate_hurst(df['Close'].tail(100).values)
     
-    # --- B. MTF Logic (Weekly Context) ---
-    # Obliczamy Weekly Trend (SMA 20 na tygodniowym)
+    # MTF Logic
     weekly_trend = "NEUTRAL"
     if not df_w.empty:
         df_w['MA_20'] = df_w['Close'].rolling(20).mean()
         if len(df_w) > 20:
-            last_w_close = df_w['Close'].iloc[-1]
-            last_w_ma = df_w['MA_20'].iloc[-1]
-            weekly_trend = "BULLISH" if last_w_close > last_w_ma else "BEARISH"
+            weekly_trend = "BULLISH" if df_w['Close'].iloc[-1] > df_w['MA_20'].iloc[-1] else "BEARISH"
 
-    # Daily Trend (SMA 50 na dziennym)
     df['MA_50'] = df['Close'].rolling(50).mean()
     daily_trend = "BULLISH" if df['Close'].iloc[-1] > df['MA_50'].iloc[-1] else "BEARISH"
 
-    # Confluence Check
-    confluence = "MIXED / CHOPPY"
+    confluence = "MIXED"
     if weekly_trend == "BULLISH" and daily_trend == "BULLISH": confluence = "STRONG UPTREND"
     elif weekly_trend == "BEARISH" and daily_trend == "BEARISH": confluence = "STRONG DOWNTREND"
-    elif weekly_trend == "BULLISH" and daily_trend == "BEARISH": confluence = "PULLBACK (Buy Dip)"
-    elif weekly_trend == "BEARISH" and daily_trend == "BULLISH": confluence = "RELIEF RALLY (Sell Rip)"
     
-    # --- C. Fair Value Model ---
+    # Fair Value
     try:
         macro_cols = [c for c in df.columns if c in ['DXY', 'US10Y', 'SPX']]
         if macro_cols:
-            # Regresja liniowa na ostatnich 60 dniach
             window = 60
             if len(df) > window:
                 model = LinearRegression()
                 X = df[macro_cols].iloc[-window:]
                 y = df['Close'].iloc[-window:]
                 model.fit(X, y)
-                # Predykcja na całym zbiorze
                 df['Fair_Value'] = model.predict(df[macro_cols])
                 df['FV_Gap'] = df['Close'] - df['Fair_Value']
-            else:
-                df['FV_Gap'] = 0.0
-        else:
-            df['FV_Gap'] = 0.0
-    except:
-        df['FV_Gap'] = 0.0
+            else: df['FV_Gap'] = 0.0
+        else: df['FV_Gap'] = 0.0
+    except: df['FV_Gap'] = 0.0
 
-    # --- D. Z-Score ---
+    # Z-Score & Correlations
     df['Z_Score'] = (df['Close'] - df['MA_50']) / df['Close'].rolling(50).std()
-
-    # --- E. Correlations ---
     for m in CONFIG['MACRO'].keys():
         if m in df.columns:
             df[f'Corr_{m}'] = df['Log_Ret'].rolling(30).corr(df[m].pct_change())
 
-    # --- F. AI Model (XGBoost) ---
+    # AI Model
     df['Target'] = (df['Close'].shift(-3) / df['Close'] - 1 > 0.0010).astype(int)
     features = ['Vol_GK', 'Z_Score'] + [c for c in df.columns if 'Corr_' in c]
     valid_features = [f for f in features if f in df.columns]
     
     model = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, n_jobs=-1)
-    # Trenujemy na danych bez ostatnich 3 dni (brak targetu)
     model.fit(df[valid_features].iloc[:-3], df['Target'].iloc[:-3])
     prob_up = model.predict_proba(df[valid_features].iloc[[-1]])[0][1]
 
-    # --- G. Monte Carlo ---
+    # Monte Carlo & Levels
     last_price = df['Close'].iloc[-1]
     vol_ann = df['Vol_GK'].iloc[-1] * np.sqrt(252)
-    # Student-t distribution for fat tails
     t_dist = t.rvs(df=3, size=1000) * (vol_ann / np.sqrt(252))
     mc_paths = last_price * np.exp(t_dist)
+    
+    # Liquidity Levels
+    res_levels, sup_levels = find_liquidity_levels(df)
 
     return {
         'price': last_price,
@@ -243,15 +247,23 @@ def run_quant_engine(df, df_w):
         'fv_gap': df['FV_Gap'].iloc[-1],
         'df': df,
         'support': np.percentile(mc_paths, 5),
-        'resistance': np.percentile(mc_paths, 95)
+        'resistance': np.percentile(mc_paths, 95),
+        'res_levels': res_levels,
+        'sup_levels': sup_levels
     }
 
 # --- 6. UI ---
-st.sidebar.header("🎛️ QUANT LAB PRO")
+st.sidebar.header("🎛️ QUANT LAB ELITE")
 symbol = st.sidebar.text_input("Asset", "EURUSD=X")
 
+# Sidebar - Risk Calculator
+st.sidebar.markdown("---")
+st.sidebar.subheader("💰 Risk Manager")
+account_size = st.sidebar.number_input("Account Equity ($)", value=10000)
+risk_per_trade = st.sidebar.slider("Risk per Trade (%)", 0.5, 5.0, 1.0)
+
 if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
-    with st.spinner("Processing Multi-Timeframe Matrix..."):
+    with st.spinner("Analyzing Liquidity & Smart Money Flows..."):
         df_d, df_w = load_data(symbol)
         
         if df_d is not None and not df_d.empty:
@@ -262,74 +274,77 @@ if st.sidebar.button("INITIALIZE SYSTEM", type="primary"):
                 signal = "LONG" if prob > 0.6 else "SHORT" if prob < 0.4 else "NEUTRAL"
                 color = "normal" if signal == "LONG" else "inverse" if signal == "SHORT" else "off"
                 
+                # Kelly Calc
+                kelly_pct = calculate_kelly(prob if prob > 0.5 else 1-prob)
+                rec_position = account_size * kelly_pct
+                
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: st.metric("PRICE", f"{res['price']:.5f}")
                 with c2: st.metric("AI CONFIDENCE", f"{prob:.1%}", delta=signal, delta_color=color)
-                with c3: st.metric("FV GAP", f"{res['fv_gap']:.4f}", delta="Fair Value Diff", delta_color="inverse")
-                with c4: st.metric("HURST EXP", f"{res['hurst']:.2f}", delta="Regime", delta_color="off")
+                with c3: st.metric("FV GAP", f"{res['fv_gap']:.4f}", delta="Mispricing", delta_color="inverse")
+                with c4: st.metric("KELLY SUGGESTION", f"${rec_position:.0f}", delta=f"{kelly_pct:.1%} of Equity")
 
                 # --- MTF MATRIX ---
                 st.markdown("---")
-                st.markdown("#### 🌐 Institutional MTF Matrix")
                 m1, m2, m3 = st.columns(3)
-                
-                # Dynamiczne kolory dla Matrixa
-                def get_color(trend):
-                    return "#00ff00" if trend == "BULLISH" else "#ff0000" if trend == "BEARISH" else "#888"
+                def get_color(trend): return "#00ff00" if trend == "BULLISH" else "#ff0000" if trend == "BEARISH" else "#888"
                 
                 m1.markdown(f"<div class='matrix-box' style='border: 1px solid {get_color(res['weekly_trend'])}; color: {get_color(res['weekly_trend'])}'>WEEKLY (Macro)<br>{res['weekly_trend']}</div>", unsafe_allow_html=True)
                 m2.markdown(f"<div class='matrix-box' style='border: 1px solid {get_color(res['daily_trend'])}; color: {get_color(res['daily_trend'])}'>DAILY (Tactical)<br>{res['daily_trend']}</div>", unsafe_allow_html=True)
-                
                 conf_color = "#00ff00" if "UP" in res['confluence'] else "#ff0000" if "DOWN" in res['confluence'] else "#ffa500"
                 m3.markdown(f"<div class='matrix-box' style='border: 1px solid {conf_color}; color: {conf_color}'>CONFLUENCE<br>{res['confluence']}</div>", unsafe_allow_html=True)
 
-                # --- CHARTS & TABS ---
-                t1, t2, t3 = st.tabs(["📈 Price & Fair Value", "📊 Volatility & Z-Score", "🌍 Macro Correlations"])
+                # --- CHARTS ---
+                t1, t2, t3 = st.tabs(["📊 SMC Liquidity", "🧠 Volatility & Z-Score", "🌍 Macro"])
                 
                 with t1:
                     fig = go.Figure()
                     pdf = res['df'].tail(150)
                     
-                    # Świece
+                    # Candles
                     fig.add_trace(go.Candlestick(x=pdf.index, open=pdf['Open'], high=pdf['High'], low=pdf['Low'], close=pdf['Close'], name='Price'))
-                    
                     # Kalman
                     fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Kalman'], line=dict(color='yellow', width=2), name='Kalman Trend'))
-                    
-                    # Fair Value Cloud
-                    if 'Fair_Value' in pdf.columns and pdf['Fair_Value'].iloc[-1] != 0:
+                    # Fair Value
+                    if 'Fair_Value' in pdf.columns:
                          fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Fair_Value'], line=dict(color='orange', dash='dash', width=1), name='Fair Value'))
+                    
+                    # Liquidity Levels (Smart Money)
+                    for level in res['res_levels'][-3:]: # Ostatnie 3 opory
+                        fig.add_hline(y=level, line_color='red', line_width=1, line_dash='dot', annotation_text="Liquidity (Sell)")
+                    for level in res['sup_levels'][-3:]: # Ostatnie 3 wsparcia
+                        fig.add_hline(y=level, line_color='green', line_width=1, line_dash='dot', annotation_text="Liquidity (Buy)")
 
-                    fig.update_layout(height=600, template='plotly_dark', title="Institutional Price Action", margin=dict(l=0,r=0,t=30,b=0))
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(height=650, template='plotly_dark', title="Institutional Chart (SMC + Liquidity)", margin=dict(l=0,r=0,t=30,b=0))
+                    st.plotly_chart(fig, width="stretch") # FIX ZASTOSOWANY
 
                 with t2:
                     c_vol, c_z = st.columns(2)
                     with c_vol:
-                        fig_v = px.line(pdf, x=pdf.index, y='Vol_GK', title="Garman-Klass Volatility (Risk)")
-                        fig_v.update_traces(line_color='#ff00ff') # Magenta line
+                        fig_v = px.line(pdf, x=pdf.index, y='Vol_GK', title="Garman-Klass Volatility")
+                        fig_v.update_traces(line_color='#ff00ff')
                         fig_v.update_layout(height=350, template='plotly_dark')
-                        st.plotly_chart(fig_v, use_container_width=True)
+                        st.plotly_chart(fig_v, width="stretch")
                         
                     with c_z:
                         fig_z = go.Figure()
                         fig_z.add_trace(go.Scatter(x=pdf.index, y=pdf['Z_Score'], fill='tozeroy', line=dict(color='cyan')))
                         fig_z.add_hline(y=2.0, line_color='red', line_dash='dash')
                         fig_z.add_hline(y=-2.0, line_color='green', line_dash='dash')
-                        fig_z.update_layout(height=350, template='plotly_dark', title="Z-Score (Reversion)")
-                        st.plotly_chart(fig_z, use_container_width=True)
+                        fig_z.update_layout(height=350, template='plotly_dark', title="Z-Score Reversion")
+                        st.plotly_chart(fig_z, width="stretch")
 
                 with t3:
                     corr_cols = [c for c in res['df'].columns if 'Corr_' in c]
                     if corr_cols:
                         curr = res['df'][corr_cols].iloc[-1].sort_values()
-                        fig = px.bar(x=curr.values, y=[c.replace('Corr_', '') for c in curr.index], orientation='h', title="Real-time Macro Drivers")
+                        fig = px.bar(x=curr.values, y=[c.replace('Corr_', '') for c in curr.index], orientation='h', title="Macro Drivers")
                         fig.update_layout(template='plotly_dark')
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
             else:
-                st.error("Quant Engine Failed. Not enough data.")
+                st.error("Engine Error. Try again.")
         else:
-            st.error("Data Feed Disconnected. Please try again.")
+            st.error("Data Feed Disconnected.")
 else:
-    st.info("System Ready. Waiting for connection...")
+    st.info("System Ready.")
