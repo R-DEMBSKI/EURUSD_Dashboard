@@ -5,6 +5,7 @@ import numpy as np
 import xgboost as xgb
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots # <--- NAPRAWIONY IMPORT
 from sklearn.linear_model import LinearRegression
 from scipy.stats import t
 from scipy.signal import argrelextrema
@@ -25,12 +26,12 @@ st.markdown("""
 <style>
     .stApp { background-color: #0e1117; }
     
-    /* HUD Styling */
+    /* HUD Metrics */
     div[data-testid="stMetricValue"] { 
         font-size: 28px; font-family: 'Courier New'; font-weight: bold;
     }
     
-    /* Matrix Styling */
+    /* Matrix Box */
     .matrix-box { 
         padding: 15px; border-radius: 8px; text-align: center; 
         font-weight: bold; margin-bottom: 10px; font-family: 'Courier New'; 
@@ -45,18 +46,19 @@ st.markdown("""
 # --- 2. MATH ENGINES ---
 
 def calculate_kelly(prob_win, win_loss_ratio=1.5):
+    """Kryterium Kelly'ego dla zarządzania kapitałem"""
     q = 1 - prob_win
     f = (win_loss_ratio * prob_win - q) / win_loss_ratio
-    return max(0, f) * 0.5 
+    return max(0, f) * 0.5 # Half-Kelly dla bezpieczeństwa
 
 def find_liquidity_levels(df, window=5):
+    """Wykrywa Smart Money Fractals (Liquidity Pools)"""
     highs = df['High'].values
     lows = df['Low'].values
     max_idx = argrelextrema(highs, np.greater, order=window)[0]
     min_idx = argrelextrema(lows, np.less, order=window)[0]
     
     recent_limit = len(df) - 60
-    # Zwracamy jako słownik dla łatwiejszego przetwarzania
     levels = []
     for i in max_idx:
         if i > recent_limit: levels.append({'price': float(highs[i]), 'type': 'Sell Liquidity (Res)', 'color': 'red'})
@@ -65,6 +67,7 @@ def find_liquidity_levels(df, window=5):
     return levels
 
 def find_fair_value_gaps(df):
+    """Wykrywa strefy FVG (Imbalance)"""
     fvgs = []
     lookback = 150
     subset = df.tail(lookback)
@@ -78,6 +81,7 @@ def find_fair_value_gaps(df):
     return fvgs[-10:]
 
 def garman_klass_volatility(df):
+    """Lepszy estymator zmienności niż odchylenie standardowe"""
     try:
         log_hl = np.log(df['High'] / df['Low'])**2
         log_co = np.log(df['Close'] / df['Open'])**2
@@ -86,6 +90,7 @@ def garman_klass_volatility(df):
         return df['Close'].pct_change().rolling(20).std()
 
 def kalman_filter(series):
+    """Filtr Kalmana do wygładzania trendu"""
     xhat = np.zeros(len(series))
     P = np.zeros(len(series))
     xhatminus = np.zeros(len(series))
@@ -103,7 +108,7 @@ def kalman_filter(series):
         P[k] = (1 - K[k]) * Pminus[k]
     return xhat
 
-# --- 3. DATA LOADER (SEQUENTIAL) ---
+# --- 3. DATA LOADER (SEQUENTIAL & SAFE) ---
 @st.cache_data(ttl=3600)
 def load_data():
     main_ticker = 'EURUSD=X'
@@ -125,7 +130,7 @@ def load_data():
     except:
         return None, None
 
-    # 2. Weekly Data (Critical for Matrix)
+    # 2. Weekly Data (For MTF Matrix)
     weekly_df = pd.DataFrame()
     try:
         weekly_df = yf.download(main_ticker, period="2y", interval="1wk", progress=False)
@@ -220,117 +225,111 @@ st.title("🏛️ QUANT LAB | Institutional V10")
 if st.button("🚀 INITIALIZE FULL SYSTEM", type="primary"):
     with st.spinner("Aggregating Institutional Feeds..."):
         df, df_w = load_data()
-        res = run_analytics(df, df_w)
         
-        if res:
-            # --- 1. HUD ---
-            # FIX: Kolory. 
-            # Jeśli prob_up > 0.6 -> LONG (Zielony). 
-            # Jeśli prob_up < 0.4 -> SHORT (Czerwony). 
-            # Używamy delta_color="normal" (góra=zielony) lub "inverse" (góra=czerwony).
+        if df is not None:
+            res = run_analytics(df, df_w)
             
-            prob = res['prob_up']
-            if prob > 0.55:
-                bias = "BULLISH"
-                bias_delta_color = "normal" # Zielony
-                bias_val = f"{prob:.1%}"
-            elif prob < 0.45:
-                bias = "BEARISH"
-                bias_delta_color = "inverse" # Czerwony
-                bias_val = f"{prob:.1%}"
-            else:
-                bias = "NEUTRAL"
-                bias_delta_color = "off"
-                bias_val = f"{prob:.1%}"
-
-            kelly = calculate_kelly(prob if prob > 0.5 else 1-prob) * 10000 * 0.5
-            
-            c1, c2, c3, c4 = st.columns(4)
-            with c1: st.metric("EURUSD PRICE", f"{res['price']:.5f}")
-            with c2: st.metric("SMC BIAS", bias, delta=bias_val, delta_color=bias_delta_color)
-            with c3: st.metric("KELLY RISK (10k)", f"${kelly:.0f}", delta="Position Size", delta_color="off")
-            with c4: st.metric("FAIR VALUE GAP", f"{res['fv_gap']:.4f}", delta="Macro Model", delta_color="inverse")
-
-            # --- 2. MATRIX (Wyrzucone z wykresu dla czytelności) ---
-            st.markdown("---")
-            m1, m2, m3 = st.columns(3)
-            def get_color(t): return "#00ff00" if t == "BULLISH" else "#ff0000" if t == "BEARISH" else "#888"
-            
-            m1.markdown(f"<div class='matrix-box' style='color:{get_color(res['weekly_trend'])}'>WEEKLY TREND<br>{res['weekly_trend']}</div>", unsafe_allow_html=True)
-            m2.markdown(f"<div class='matrix-box' style='color:{get_color(res['daily_trend'])}'>DAILY TREND<br>{res['daily_trend']}</div>", unsafe_allow_html=True)
-            
-            conf_c = "#00ff00" if "UP" in res['confluence'] else "#ff0000" if "DOWN" in res['confluence'] else "orange"
-            m3.markdown(f"<div class='matrix-box' style='color:{conf_c}'>CONFLUENCE<br>{res['confluence']}</div>", unsafe_allow_html=True)
-
-            # --- 3. MAIN CHART (HUGE & CLEAN) ---
-            st.markdown("### 🔭 Institutional Price Action (SMC + Kalman)")
-            fig = go.Figure()
-            pdf = res['df'].tail(150)
-            
-            # Candles
-            fig.add_trace(go.Candlestick(x=pdf.index, open=pdf['Open'], high=pdf['High'], low=pdf['Low'], close=pdf['Close'], name='Price'))
-            # Kalman
-            fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Kalman'], line=dict(color='yellow', width=2), name='Kalman Filter'))
-            
-            # FVG (Rectangles)
-            for fvg in res['fvgs']:
-                if fvg['start'] >= pdf.index[0]:
-                    fig.add_shape(type="rect", x0=fvg['start'], x1=pdf.index[-1] + pd.Timedelta(days=1), 
-                                  y0=fvg['bottom'], y1=fvg['top'], fillcolor=fvg['color'], line=dict(width=0), layer="below")
-            
-            # Liquidity Lines
-            for level in res['liquidity']:
-                if level['price'] > pdf['Low'].min() and level['price'] < pdf['High'].max():
-                    c = "red" if "Sell" in level['type'] else "#00ff00"
-                    fig.add_hline(y=level['price'], line_dash="dot", line_color=c, annotation_text=level['type'])
-
-            fig.update_layout(height=700, template='plotly_dark', margin=dict(l=0,r=0,t=20,b=0), xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-            # --- 4. DEEP DIVE TABS (PRZYWRÓCONE) ---
-            t1, t2, t3 = st.tabs(["📋 Liquidity Data", "📊 Z-Score & Volatility", "🌍 Macro Correlations"])
-            
-            with t1:
-                st.caption("Active Liquidity Pools (Data Feed)")
-                liq_data = [{'Level': l['price'], 'Type': l['type'], 'Dist (pips)': f"{(l['price']-res['price'])*10000:.1f}"} for l in res['liquidity']]
-                st.dataframe(pd.DataFrame(liq_data).sort_values('Level', ascending=False), use_container_width=True)
-                
-            with t2:
-                c_z, c_v = st.columns(2)
-                with c_z:
-                    fig_z = go.Figure()
-                    fig_z.add_trace(go.Scatter(x=pdf.index, y=pdf['Z_Score'], fill='tozeroy', line=dict(color='cyan')))
-                    fig_z.add_hline(y=2.0, line_color='red', line_dash='dash')
-                    fig_z.add_hline(y=-2.0, line_color='green', line_dash='dash')
-                    fig_z.update_layout(height=300, template='plotly_dark', title="Z-Score (Overbought/Oversold)")
-                    st.plotly_chart(fig_z, use_container_width=True)
-                with c_v:
-                    fig_v = px.line(pdf, x=pdf.index, y='Vol_GK', title="Garman-Klass Volatility")
-                    fig_v.update_traces(line_color='magenta')
-                    fig_v.update_layout(height=300, template='plotly_dark')
-                    st.plotly_chart(fig_v, use_container_width=True)
-                    
-            with t3:
-                if res['macro_ok']:
-                    # Macro Divergence Chart
-                    fig_m = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig_m.add_trace(go.Scatter(x=pdf.index, y=pdf['Close'], name="EURUSD"), secondary_y=False)
-                    if 'US10Y' in pdf.columns:
-                        fig_m.add_trace(go.Scatter(x=pdf.index, y=pdf['US10Y'], name="US10Y Yield", line=dict(color='orange')), secondary_y=True)
-                    fig_m.update_layout(height=400, template='plotly_dark', title="Yield Divergence (Price vs Rates)")
-                    st.plotly_chart(fig_m, use_container_width=True)
-                    
-                    # Correlation Bar
-                    corr_cols = [c for c in res['df'].columns if 'Corr_' in c]
-                    if corr_cols:
-                        curr = res['df'][corr_cols].iloc[-1].sort_values()
-                        fig_c = px.bar(x=curr.values, y=[c.replace('Corr_', '') for c in curr.index], orientation='h', title="Live Correlations")
-                        fig_c.update_layout(template='plotly_dark')
-                        st.plotly_chart(fig_c, use_container_width=True)
+            if res:
+                # --- 1. HUD (Naprawione Kolory) ---
+                prob = res['prob_up']
+                if prob > 0.55:
+                    bias = "BULLISH"
+                    bias_color = "normal" # Zielony w Streamlit
+                elif prob < 0.45:
+                    bias = "BEARISH"
+                    bias_color = "inverse" # Czerwony w Streamlit (dla delty)
                 else:
-                    st.warning("Macro data unavailable due to API limits. Showing Price Action only.")
+                    bias = "NEUTRAL"
+                    bias_color = "off"
 
+                kelly = calculate_kelly(prob if prob > 0.5 else 1-prob) * 10000 * 0.5
+                
+                c1, c2, c3, c4 = st.columns(4)
+                with c1: st.metric("EURUSD PRICE", f"{res['price']:.5f}")
+                with c2: st.metric("SMC BIAS", bias, delta=f"{prob:.1%}", delta_color=bias_color)
+                with c3: st.metric("KELLY RISK (10k)", f"${kelly:.0f}", delta="Position Size", delta_color="off")
+                with c4: st.metric("FAIR VALUE GAP", f"{res['fv_gap']:.4f}", delta="Macro Model", delta_color="inverse")
+
+                # --- 2. MATRIX ---
+                st.markdown("---")
+                m1, m2, m3 = st.columns(3)
+                def get_color(t): return "#00ff00" if t == "BULLISH" else "#ff0000" if t == "BEARISH" else "#888"
+                
+                m1.markdown(f"<div class='matrix-box' style='color:{get_color(res['weekly_trend'])}'>WEEKLY TREND<br>{res['weekly_trend']}</div>", unsafe_allow_html=True)
+                m2.markdown(f"<div class='matrix-box' style='color:{get_color(res['daily_trend'])}'>DAILY TREND<br>{res['daily_trend']}</div>", unsafe_allow_html=True)
+                
+                conf_c = "#00ff00" if "UP" in res['confluence'] else "#ff0000" if "DOWN" in res['confluence'] else "orange"
+                m3.markdown(f"<div class='matrix-box' style='color:{conf_c}'>CONFLUENCE<br>{res['confluence']}</div>", unsafe_allow_html=True)
+
+                # --- 3. MAIN CHART (SMC + FVG + Kalman) ---
+                st.markdown("### 🔭 Institutional Price Action")
+                fig = go.Figure()
+                pdf = res['df'].tail(150)
+                
+                # Candles
+                fig.add_trace(go.Candlestick(x=pdf.index, open=pdf['Open'], high=pdf['High'], low=pdf['Low'], close=pdf['Close'], name='Price'))
+                # Kalman
+                fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Kalman'], line=dict(color='yellow', width=2), name='Kalman Filter'))
+                
+                # FVG (Rectangles)
+                for fvg in res['fvgs']:
+                    if fvg['start'] >= pdf.index[0]:
+                        fig.add_shape(type="rect", x0=fvg['start'], x1=pdf.index[-1] + pd.Timedelta(days=1), 
+                                      y0=fvg['bottom'], y1=fvg['top'], fillcolor=fvg['color'], line=dict(width=0), layer="below")
+                
+                # Liquidity Lines
+                for level in res['liquidity']:
+                    if level['price'] > pdf['Low'].min() and level['price'] < pdf['High'].max():
+                        c = "red" if "Sell" in level['type'] else "#00ff00"
+                        fig.add_hline(y=level['price'], line_dash="dot", line_color=c, annotation_text=level['type'])
+
+                fig.update_layout(height=700, template='plotly_dark', margin=dict(l=0,r=0,t=20,b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+                # --- 4. TABS & DATA ---
+                t1, t2, t3 = st.tabs(["📋 Liquidity Data", "📊 Z-Score & Volatility", "🌍 Macro Correlations"])
+                
+                with t1:
+                    st.caption("Active Liquidity Pools (Data Feed)")
+                    liq_data = [{'Level': l['price'], 'Type': l['type'], 'Dist (pips)': f"{(l['price']-res['price'])*10000:.1f}"} for l in res['liquidity']]
+                    st.dataframe(pd.DataFrame(liq_data).sort_values('Level', ascending=False), use_container_width=True)
+                    
+                with t2:
+                    c_z, c_v = st.columns(2)
+                    with c_z:
+                        fig_z = go.Figure()
+                        fig_z.add_trace(go.Scatter(x=pdf.index, y=pdf['Z_Score'], fill='tozeroy', line=dict(color='cyan')))
+                        fig_z.add_hline(y=2.0, line_color='red', line_dash='dash')
+                        fig_z.add_hline(y=-2.0, line_color='green', line_dash='dash')
+                        fig_z.update_layout(height=300, template='plotly_dark', title="Z-Score (Overbought/Oversold)")
+                        st.plotly_chart(fig_z, use_container_width=True)
+                    with c_v:
+                        fig_v = px.line(pdf, x=pdf.index, y='Vol_GK', title="Garman-Klass Volatility")
+                        fig_v.update_traces(line_color='magenta')
+                        fig_v.update_layout(height=300, template='plotly_dark')
+                        st.plotly_chart(fig_v, use_container_width=True)
+                        
+                with t3:
+                    if res['macro_ok']:
+                        fig_m = make_subplots(specs=[[{"secondary_y": True}]])
+                        fig_m.add_trace(go.Scatter(x=pdf.index, y=pdf['Close'], name="EURUSD"), secondary_y=False)
+                        if 'US10Y' in pdf.columns:
+                            fig_m.add_trace(go.Scatter(x=pdf.index, y=pdf['US10Y'], name="US10Y Yield", line=dict(color='orange')), secondary_y=True)
+                        fig_m.update_layout(height=400, template='plotly_dark', title="Yield Divergence (Price vs Rates)")
+                        st.plotly_chart(fig_m, use_container_width=True)
+                        
+                        corr_cols = [c for c in res['df'].columns if 'Corr_' in c]
+                        if corr_cols:
+                            curr = res['df'][corr_cols].iloc[-1].sort_values()
+                            fig_c = px.bar(x=curr.values, y=[c.replace('Corr_', '') for c in curr.index], orientation='h', title="Live Correlations")
+                            fig_c.update_layout(template='plotly_dark')
+                            st.plotly_chart(fig_c, use_container_width=True)
+                    else:
+                        st.warning("Macro data unavailable (API Rate Limit). Price analysis active.")
+
+            else:
+                st.error("Engine failure. Data insufficient.")
         else:
-            st.error("System Failure. Check API connection.")
+            st.error("Feed Disconnected. Try again.")
 else:
     st.info("System Ready. Click INITIALIZE.")
